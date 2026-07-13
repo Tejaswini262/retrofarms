@@ -1,0 +1,43 @@
+.App {
+    background: #F7F1E5;
+    min-height: 100vh;
+    color: #2B1D11;
+}
+
+.font-serif {
+    font-family: 'Cormorant Garamond', 'Playfair Display', Georgia, serif;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+}
+
+body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: #F7F1E5;
+    color: #2B1D11;
+}
+
+html {
+    scroll-behavior: smooth;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+::-webkit-scrollbar-track {
+    background: #EFE4CB;
+}
+::-webkit-scrollbar-thumb {
+    background: #C4A97F;
+    border-radius: 8px;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: #A88C60;
+}
+
+/* Selection */
+::selection {
+    background: #2B1D11;
+    color: #F7F1E5;
+}
