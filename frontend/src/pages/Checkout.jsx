@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../lib/api';
 import { useApp } from '../context/AppContext';
-import { Truck, Wallet, CreditCard } from 'lucide-react';
+import { Truck, Wallet, CreditCard, MapPin, Loader2 } from 'lucide-react';
 
 const RZP_KEY = process.env.REACT_APP_RAZORPAY_KEY_ID;
 
@@ -24,6 +24,8 @@ const Checkout = () => {
   const [payment, setPayment] = useState('razorpay');
   const [placing, setPlacing] = useState(false);
   const [error, setError] = useState('');
+  const [locating, setLocating] = useState(false);
+  const [locNote, setLocNote] = useState('');
 
   useEffect(() => {
     if (!user) { navigate('/login'); return; }
@@ -32,6 +34,57 @@ const Checkout = () => {
   }, [user, cart, navigate]);
 
   const handleField = (k, v) => setAddress((a) => ({ ...a, [k]: v }));
+
+  const detectLocation = () => {
+    setError(''); setLocNote('');
+    if (!('geolocation' in navigator)) {
+      setLocNote('Geolocation is not supported in this browser.');
+      return;
+    }
+    setLocating(true);
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        try {
+          const { latitude, longitude } = pos.coords;
+          const r = await fetch(
+            `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${latitude}&lon=${longitude}&addressdetails=1&zoom=18`,
+            { headers: { 'Accept-Language': 'en' } },
+          );
+          if (!r.ok) throw new Error('Reverse geocoding failed');
+          const data = await r.json();
+          const a = data.address || {};
+          const line1Parts = [
+            a.house_number, a.building, a.road || a.pedestrian || a.footway || a.residential,
+          ].filter(Boolean);
+          const line2Parts = [
+            a.neighbourhood || a.suburb || a.village || a.hamlet,
+          ].filter(Boolean);
+          const city = a.city || a.town || a.village || a.county || a.state_district || '';
+          const pincode = a.postcode || '';
+          const landmark = a.amenity || a.shop || '';
+          setAddress((prev) => ({
+            ...prev,
+            line1: prev.line1 || line1Parts.join(' ') || data.display_name?.split(',').slice(0, 2).join(',') || '',
+            line2: prev.line2 || line2Parts.join(', ') || '',
+            city: prev.city && prev.city !== 'Hyderabad' ? prev.city : (city || prev.city),
+            pincode: prev.pincode || pincode,
+            landmark: prev.landmark || landmark,
+          }));
+          setLocNote('Address filled from your location. Please verify and edit if needed.');
+        } catch (e) {
+          setLocNote('Could not resolve address. Please type it manually.');
+        } finally { setLocating(false); }
+      },
+      (err) => {
+        setLocating(false);
+        if (err.code === 1) setLocNote('Location permission denied. Type your address below.');
+        else if (err.code === 2) setLocNote('Location unavailable. Type your address below.');
+        else if (err.code === 3) setLocNote('Location request timed out. Try again or type manually.');
+        else setLocNote('Could not detect location. Type your address below.');
+      },
+      { enableHighAccuracy: true, timeout: 12000, maximumAge: 60000 },
+    );
+  };
 
   const submit = async (e) => {
     e.preventDefault();
@@ -97,7 +150,26 @@ const Checkout = () => {
         <form onSubmit={submit} className="grid lg:grid-cols-3 gap-10">
           <div className="lg:col-span-2 space-y-6">
             <div className="bg-white border border-[#E4D9C1] rounded-2xl p-8">
-              <div className="flex items-center gap-2 mb-6"><Truck size={20} className="text-[#4E6A3C]" /><h2 className="font-serif text-2xl text-[#2B1D11]">Delivery address</h2></div>
+              <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
+                <div className="flex items-center gap-2">
+                  <Truck size={20} className="text-[#4E6A3C]" />
+                  <h2 className="font-serif text-2xl text-[#2B1D11]">Delivery address</h2>
+                </div>
+                <button
+                  type="button"
+                  onClick={detectLocation}
+                  disabled={locating}
+                  className="inline-flex items-center gap-2 text-sm border border-[#4E6A3C] text-[#4E6A3C] hover:bg-[#4E6A3C] hover:text-white transition-colors px-4 py-2 rounded-full disabled:opacity-60"
+                >
+                  {locating ? <Loader2 size={15} className="animate-spin" /> : <MapPin size={15} />}
+                  {locating ? 'Detecting…' : 'Use my location'}
+                </button>
+              </div>
+              {locNote && (
+                <div className="mb-4 text-xs px-4 py-2 rounded-lg bg-[#EFE4CB] text-[#5C3B1E] border border-[#E4D9C1]">
+                  {locNote}
+                </div>
+              )}
               <div className="grid sm:grid-cols-2 gap-4">
                 <input value={address.full_name} onChange={(e) => handleField('full_name', e.target.value)} placeholder="Full name*" className="w-full px-4 py-3 border border-[#E4D9C1] rounded-xl focus:outline-none focus:border-[#2B1D11]" />
                 <input value={address.phone} onChange={(e) => handleField('phone', e.target.value)} placeholder="Phone*" className="w-full px-4 py-3 border border-[#E4D9C1] rounded-xl focus:outline-none focus:border-[#2B1D11]" />
