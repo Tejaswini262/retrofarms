@@ -1,113 +1,66 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
-import { ADMIN_CREDENTIALS } from '../data/mock';
+import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
+import api from '../lib/api';
 
 const AppContext = createContext(null);
-
 export const useApp = () => useContext(AppContext);
 
 export const AppProvider = ({ children }) => {
-  const [user, setUser] = useState(() => {
-    try {
-      const raw = localStorage.getItem('rf_user');
-      return raw ? JSON.parse(raw) : null;
-    } catch { return null; }
-  });
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
   const [cart, setCart] = useState(() => {
-    try {
-      const raw = localStorage.getItem('rf_cart');
-      return raw ? JSON.parse(raw) : [];
-    } catch { return []; }
+    try { return JSON.parse(localStorage.getItem('rf_cart') || '[]'); } catch { return []; }
   });
 
-  useEffect(() => {
-    localStorage.setItem('rf_cart', JSON.stringify(cart));
-  }, [cart]);
+  useEffect(() => { localStorage.setItem('rf_cart', JSON.stringify(cart)); }, [cart]);
+
+  const checkAuth = useCallback(async () => {
+    try {
+      const r = await api.get('/auth/me');
+      setUser(r.data);
+    } catch { setUser(null); }
+    finally { setAuthLoading(false); }
+  }, []);
 
   useEffect(() => {
-    if (user) localStorage.setItem('rf_user', JSON.stringify(user));
-    else localStorage.removeItem('rf_user');
-  }, [user]);
+    // Skip /me check if returning from OAuth callback
+    if (typeof window !== 'undefined' && window.location.hash?.includes('session_id=')) {
+      setAuthLoading(false);
+      return;
+    }
+    checkAuth();
+  }, [checkAuth]);
 
   const addToCart = (product, variant, qty = 1) => {
     setCart((prev) => {
       const key = `${product.slug}_${variant.id}`;
       const existing = prev.find((c) => c.key === key);
-      if (existing) {
-        return prev.map((c) => (c.key === key ? { ...c, qty: c.qty + qty } : c));
-      }
-      return [
-        ...prev,
-        {
-          key,
-          slug: product.slug,
-          name: product.name,
-          image: product.image,
-          variantId: variant.id,
-          variantLabel: variant.label,
-          price: variant.price,
-          qty,
-        },
-      ];
+      if (existing) return prev.map((c) => (c.key === key ? { ...c, qty: c.qty + qty } : c));
+      return [...prev, {
+        key, slug: product.slug, name: product.name, image: product.image,
+        variantId: variant.id, variantLabel: variant.label, price: variant.price, qty,
+      }];
     });
   };
-
-  const updateQty = (key, qty) => {
-    setCart((prev) => prev.map((c) => (c.key === key ? { ...c, qty: Math.max(1, qty) } : c)));
-  };
-
-  const removeFromCart = (key) => {
-    setCart((prev) => prev.filter((c) => c.key !== key));
-  };
-
+  const updateQty = (key, qty) => setCart((p) => p.map((c) => c.key === key ? { ...c, qty: Math.max(1, qty) } : c));
+  const removeFromCart = (key) => setCart((p) => p.filter((c) => c.key !== key));
   const clearCart = () => setCart([]);
 
-  const loginWithGoogle = () => {
-    // Mocked Google login
-    const fake = {
-      name: 'Guest Customer',
-      email: 'guest.customer@gmail.com',
-      picture: 'https://lh3.googleusercontent.com/a/default-user',
-      role: 'customer',
-      provider: 'google',
-    };
-    setUser(fake);
-    return fake;
+  const logout = async () => {
+    try { await api.post('/auth/logout'); } catch {}
+    setUser(null);
   };
 
-  const loginWithEmail = (email, password) => {
-    const found = Object.values(ADMIN_CREDENTIALS).find(
-      (c) => c.email.toLowerCase() === email.toLowerCase() && c.password === password,
-    );
-    if (found) {
-      const u = { name: found.name, email: found.email, role: found.role, provider: 'email' };
-      setUser(u);
-      return u;
-    }
-    return null;
-  };
-
-  const logout = () => setUser(null);
-
-  const cartCount = cart.reduce((sum, c) => sum + c.qty, 0);
-  const cartTotal = cart.reduce((sum, c) => sum + c.qty * c.price, 0);
+  const cartCount = cart.reduce((s, c) => s + c.qty, 0);
+  const cartSubtotal = cart.reduce((s, c) => s + c.qty * c.price, 0);
+  const deliveryCharge = cart.length > 0 && cartSubtotal < 200 ? 100 : 0;
+  const cartTotal = cartSubtotal + deliveryCharge;
 
   return (
-    <AppContext.Provider
-      value={{
-        user,
-        setUser,
-        cart,
-        cartCount,
-        cartTotal,
-        addToCart,
-        updateQty,
-        removeFromCart,
-        clearCart,
-        loginWithGoogle,
-        loginWithEmail,
-        logout,
-      }}
-    >
+    <AppContext.Provider value={{
+      user, setUser, authLoading, checkAuth, logout,
+      cart, cartCount, cartSubtotal, deliveryCharge, cartTotal,
+      addToCart, updateQty, removeFromCart, clearCart,
+    }}>
       {children}
     </AppContext.Provider>
   );

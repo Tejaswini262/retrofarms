@@ -1,89 +1,646 @@
-from fastapi import FastAPI, APIRouter
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, Cookie
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from pydantic import BaseModel, Field, EmailStr
+from typing import List, Optional, Dict, Any
 import os
-import logging
-from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
-from typing import List
 import uuid
-from datetime import datetime, timezone
-
+import hmac
+import hashlib
+import logging
+import bcrypt
+import httpx
+import razorpay
+from pathlib import Path
+from datetime import datetime, timezone, timedelta
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+MONGO_URL = os.environ['MONGO_URL']
+DB_NAME = os.environ['DB_NAME']
+RZP_KEY_ID = os.environ['RAZORPAY_KEY_ID']
+RZP_KEY_SECRET = os.environ['RAZORPAY_KEY_SECRET']
 
-# Create the main app without a prefix
-app = FastAPI()
+client = AsyncIOMotorClient(MONGO_URL)
+db = client[DB_NAME]
 
-# Create a router with the /api prefix
-api_router = APIRouter(prefix="/api")
+rzp = razorpay.Client(auth=(RZP_KEY_ID, RZP_KEY_SECRET))
 
+app = FastAPI(title="Retro Farms API")
+api = APIRouter(prefix="/api")
 
-# Define Models
-class StatusCheck(BaseModel):
-    model_config = ConfigDict(extra="ignore")  # Ignore MongoDB's _id field
-    
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    client_name: str
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+# ==================== SEED DATA ====================
 
-class StatusCheckCreate(BaseModel):
-    client_name: str
+SEED_PRODUCTS = [
+    {
+        'slug': 'country-eggs', 'name': 'Country Eggs (Free Range)', 'category': 'eggs',
+        'image': 'https://images.unsplash.com/photo-1498654077810-12c21d4d6dc3?auto=format&fit=crop&w=1000&q=80',
+        'from_price': 180, 'description': 'Farm-fresh brown eggs from free-roaming country hens. Naturally rich yolks, no antibiotics, no cages.',
+        'variants': [
+            {'id': 'dozen', 'label': '1 Dozen (12 eggs)', 'price': 180, 'stock': 194},
+            {'id': 'tray', 'label': '1 Tray (30 eggs)', 'price': 420, 'stock': 118},
+        ],
+    },
+    {
+        'slug': 'country-chicken', 'name': 'Country Chicken (Live Weight)', 'category': 'chicken',
+        'image': 'https://images.unsplash.com/photo-1535275226173-7ee8b465f0c1?auto=format&fit=crop&w=1000&q=80',
+        'from_price': 340, 'description': 'Free-range country chicken raised on grains and greens. Sold by live weight, cleaned & delivered same day.',
+        'variants': [
+            {'id': '1kg', 'label': '1 kg (approx.)', 'price': 340, 'stock': 22},
+            {'id': '2kg', 'label': '2 kg (approx.)', 'price': 660, 'stock': 14},
+        ],
+    },
+    {
+        'slug': 'alphonso-mango', 'name': 'Alphonso Mango', 'category': 'fruits',
+        'image': 'https://images.unsplash.com/photo-1553279768-865429fa0078?auto=format&fit=crop&w=1000&q=80',
+        'from_price': 220, 'description': 'Sun-ripened Alphonso mangoes from our orchard. Sweet, aromatic and naturally grown.',
+        'variants': [
+            {'id': '1kg', 'label': '1 kg', 'price': 220, 'stock': 46},
+            {'id': '3kg', 'label': '3 kg box', 'price': 620, 'stock': 20},
+        ],
+    },
+    {
+        'slug': 'guava', 'name': 'Guava', 'category': 'fruits',
+        'image': 'https://images.unsplash.com/photo-1536511132770-e5058c7e8c46?auto=format&fit=crop&w=1000&q=80',
+        'from_price': 90, 'description': 'Crisp, farm-picked guavas. Pesticide-free and packed with vitamin C.',
+        'variants': [
+            {'id': '1kg', 'label': '1 kg', 'price': 90, 'stock': 60},
+            {'id': '2kg', 'label': '2 kg', 'price': 170, 'stock': 30},
+        ],
+    },
+    {
+        'slug': 'lemon', 'name': 'Lemon', 'category': 'fruits',
+        'image': 'https://images.unsplash.com/photo-1590502593747-42a996133562?auto=format&fit=crop&w=1000&q=80',
+        'from_price': 60, 'description': 'Juicy country lemons — thin skin, plenty of juice, chemical-free.',
+        'variants': [
+            {'id': '500g', 'label': '500 g', 'price': 60, 'stock': 80},
+            {'id': '1kg', 'label': '1 kg', 'price': 110, 'stock': 55},
+        ],
+    },
+    {
+        'slug': 'sapota', 'name': 'Sapota (Chiku)', 'category': 'fruits',
+        'image': 'https://images.unsplash.com/photo-1610970881699-44a5587cabec?auto=format&fit=crop&w=1000&q=80',
+        'from_price': 110, 'description': 'Naturally-ripened sapota — soft, sweet and grown on our farm.',
+        'variants': [{'id': '1kg', 'label': '1 kg', 'price': 110, 'stock': 40}],
+    },
+    {
+        'slug': 'papaya', 'name': 'Papaya', 'category': 'fruits',
+        'image': 'https://images.unsplash.com/photo-1617112848923-cc2234396a8d?auto=format&fit=crop&w=1000&q=80',
+        'from_price': 80, 'description': 'Tree-ripened papayas, orange fleshed and full of flavor.',
+        'variants': [{'id': 'each', 'label': '1 piece (approx 1kg)', 'price': 80, 'stock': 25}],
+    },
+    {
+        'slug': 'moringa', 'name': 'Moringa (Drumsticks)', 'category': 'vegetables',
+        'image': 'https://images.unsplash.com/photo-1666904854830-c5c0e7b6f6f1?auto=format&fit=crop&w=1000&q=80',
+        'from_price': 45, 'description': 'Fresh drumsticks from farm moringa trees. Ideal for sambar and curries.',
+        'variants': [{'id': '250g', 'label': '250 g bunch', 'price': 45, 'stock': 70}],
+    },
+    {
+        'slug': 'bottle-gourd', 'name': 'Bottle Gourd', 'category': 'vegetables',
+        'image': 'https://images.unsplash.com/photo-1615485500704-8e990f9900f7?auto=format&fit=crop&w=1000&q=80',
+        'from_price': 50, 'description': 'Tender bottle gourds, hand-picked and pesticide-free.',
+        'variants': [{'id': 'each', 'label': '1 piece', 'price': 50, 'stock': 34}],
+    },
+    {
+        'slug': 'tomatoes', 'name': 'Tomatoes', 'category': 'vegetables',
+        'image': 'https://images.unsplash.com/photo-1592924357228-91a4daadcfea?auto=format&fit=crop&w=1000&q=80',
+        'from_price': 55, 'description': 'Vine-ripened country tomatoes bursting with flavor.',
+        'variants': [{'id': '1kg', 'label': '1 kg', 'price': 55, 'stock': 90}],
+    },
+    {
+        'slug': 'green-chilli', 'name': 'Green Chilli', 'category': 'vegetables',
+        'image': 'https://images.unsplash.com/photo-1526346093744-3d4b6ee7f2f5?auto=format&fit=crop&w=1000&q=80',
+        'from_price': 30, 'description': 'Farm-grown green chillies with a mild, aromatic heat.',
+        'variants': [{'id': '250g', 'label': '250 g', 'price': 30, 'stock': 65}],
+    },
+]
 
-# Add your routes to the router instead of directly to app
-@api_router.get("/")
+# ==================== MODELS ====================
+
+class Variant(BaseModel):
+    id: str
+    label: str
+    price: int
+    stock: int
+
+class Product(BaseModel):
+    slug: str
+    name: str
+    category: str
+    image: str
+    from_price: int
+    description: str
+    variants: List[Variant]
+
+class CartItem(BaseModel):
+    slug: str
+    variant_id: str
+    qty: int
+
+class Address(BaseModel):
+    full_name: str
+    phone: str
+    line1: str
+    line2: Optional[str] = ''
+    city: str
+    pincode: str
+    landmark: Optional[str] = ''
+
+class OrderCreatePayload(BaseModel):
+    items: List[CartItem]
+    address: Address
+    payment_method: str  # 'razorpay' or 'cod'
+
+class PaymentVerifyPayload(BaseModel):
+    order_id: str  # our order id
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+
+class UpdateOrderPayload(BaseModel):
+    status: Optional[str] = None
+    assigned_staff_id: Optional[str] = None
+
+class UpdateStockPayload(BaseModel):
+    stock: int
+
+class AdminLoginPayload(BaseModel):
+    email: str
+    password: str
+
+class StaffCreatePayload(BaseModel):
+    name: str
+    email: str
+    phone: Optional[str] = ''
+    password: str
+    role: str = 'staff'  # 'staff' or 'admin'
+
+# ==================== HELPERS ====================
+
+def now_utc():
+    return datetime.now(timezone.utc)
+
+def hash_password(pw: str) -> str:
+    return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
+
+def check_password(pw: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(pw.encode(), hashed.encode())
+    except Exception:
+        return False
+
+async def get_current_user(request: Request) -> Optional[Dict[str, Any]]:
+    token = request.cookies.get('session_token')
+    if not token:
+        auth = request.headers.get('Authorization', '')
+        if auth.startswith('Bearer '):
+            token = auth[7:]
+    if not token:
+        return None
+    session = await db.sessions.find_one({'session_token': token}, {'_id': 0})
+    if not session:
+        return None
+    exp = session.get('expires_at')
+    if isinstance(exp, str):
+        exp = datetime.fromisoformat(exp)
+    if exp and exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    if exp and exp < now_utc():
+        return None
+    user = await db.users.find_one({'user_id': session['user_id']}, {'_id': 0})
+    return user
+
+async def require_user(request: Request):
+    u = await get_current_user(request)
+    if not u:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return u
+
+async def require_admin_or_staff(request: Request):
+    u = await require_user(request)
+    if u.get('role') not in ('admin', 'staff'):
+        raise HTTPException(status_code=403, detail="Admin/staff only")
+    return u
+
+async def require_admin(request: Request):
+    u = await require_user(request)
+    if u.get('role') != 'admin':
+        raise HTTPException(status_code=403, detail="Admin only")
+    return u
+
+def user_public(u: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        'user_id': u['user_id'],
+        'email': u['email'],
+        'name': u.get('name', ''),
+        'picture': u.get('picture', ''),
+        'role': u.get('role', 'customer'),
+        'phone': u.get('phone', ''),
+    }
+
+# ==================== STARTUP ====================
+
+@app.on_event("startup")
+async def startup():
+    # Seed products if empty
+    if await db.products.count_documents({}) == 0:
+        await db.products.insert_many([{**p} for p in SEED_PRODUCTS])
+        logging.info("Seeded products")
+
+    # Seed admin/staff users if not exist
+    admin_email = os.environ['ADMIN_EMAIL']
+    if not await db.users.find_one({'email': admin_email}):
+        await db.users.insert_one({
+            'user_id': f"user_{uuid.uuid4().hex[:12]}",
+            'email': admin_email,
+            'name': 'Retro Farms Admin',
+            'phone': '',
+            'role': 'admin',
+            'password_hash': hash_password(os.environ['ADMIN_PASSWORD']),
+            'created_at': now_utc(),
+            'provider': 'email',
+        })
+    staff_email = os.environ['STAFF_EMAIL']
+    if not await db.users.find_one({'email': staff_email}):
+        await db.users.insert_one({
+            'user_id': f"user_{uuid.uuid4().hex[:12]}",
+            'email': staff_email,
+            'name': 'Retro Farms Staff',
+            'phone': '',
+            'role': 'staff',
+            'password_hash': hash_password(os.environ['STAFF_PASSWORD']),
+            'created_at': now_utc(),
+            'provider': 'email',
+        })
+
+@app.on_event("shutdown")
+async def shutdown():
+    client.close()
+
+# ==================== AUTH ROUTES ====================
+
+@api.get("/")
 async def root():
-    return {"message": "Hello World"}
+    return {"message": "Retro Farms API"}
 
-@api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_dict = input.model_dump()
-    status_obj = StatusCheck(**status_dict)
-    
-    # Convert to dict and serialize datetime to ISO string for MongoDB
-    doc = status_obj.model_dump()
-    doc['timestamp'] = doc['timestamp'].isoformat()
-    
-    _ = await db.status_checks.insert_one(doc)
-    return status_obj
+@api.post("/auth/session")
+async def create_session(request: Request, response: Response):
+    """Exchange Emergent session_id for our session_token cookie."""
+    body = await request.json()
+    session_id = body.get('session_id')
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id required")
+    async with httpx.AsyncClient(timeout=15) as h:
+        r = await h.get(
+            "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
+            headers={'X-Session-ID': session_id},
+        )
+    if r.status_code != 200:
+        raise HTTPException(status_code=401, detail="Invalid session_id")
+    data = r.json()
+    email = data['email']
+    # find or create user
+    existing = await db.users.find_one({'email': email})
+    if existing:
+        user_id = existing['user_id']
+        await db.users.update_one(
+            {'user_id': user_id},
+            {'$set': {'name': data.get('name', existing.get('name', '')),
+                       'picture': data.get('picture', existing.get('picture', ''))}},
+        )
+        role = existing.get('role', 'customer')
+    else:
+        user_id = f"user_{uuid.uuid4().hex[:12]}"
+        role = 'customer'
+        await db.users.insert_one({
+            'user_id': user_id,
+            'email': email,
+            'name': data.get('name', ''),
+            'picture': data.get('picture', ''),
+            'role': role,
+            'provider': 'google',
+            'created_at': now_utc(),
+        })
+    token = data['session_token']
+    expires_at = now_utc() + timedelta(days=7)
+    await db.sessions.insert_one({
+        'session_token': token,
+        'user_id': user_id,
+        'expires_at': expires_at,
+        'created_at': now_utc(),
+    })
+    response.set_cookie(
+        key='session_token', value=token, httponly=True, secure=True,
+        samesite='none', path='/', max_age=7 * 24 * 3600,
+    )
+    user = await db.users.find_one({'user_id': user_id}, {'_id': 0})
+    return user_public(user)
 
-@api_router.get("/status", response_model=List[StatusCheck])
-async def get_status_checks():
-    # Exclude MongoDB's _id field from the query results
-    status_checks = await db.status_checks.find({}, {"_id": 0}).to_list(1000)
-    
-    # Convert ISO string timestamps back to datetime objects
-    for check in status_checks:
-        if isinstance(check['timestamp'], str):
-            check['timestamp'] = datetime.fromisoformat(check['timestamp'])
-    
-    return status_checks
+@api.post("/auth/admin-login")
+async def admin_login(payload: AdminLoginPayload, response: Response):
+    user = await db.users.find_one({'email': payload.email.lower()})
+    if not user or not user.get('password_hash') or not check_password(payload.password, user['password_hash']):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    if user.get('role') not in ('admin', 'staff'):
+        raise HTTPException(status_code=403, detail="Not an admin/staff account")
+    token = f"sess_{uuid.uuid4().hex}"
+    expires_at = now_utc() + timedelta(days=7)
+    await db.sessions.insert_one({
+        'session_token': token, 'user_id': user['user_id'],
+        'expires_at': expires_at, 'created_at': now_utc(),
+    })
+    response.set_cookie(
+        key='session_token', value=token, httponly=True, secure=True,
+        samesite='none', path='/', max_age=7 * 24 * 3600,
+    )
+    return user_public(user)
 
-# Include the router in the main app
-app.include_router(api_router)
+@api.get("/auth/me")
+async def me(request: Request):
+    u = await get_current_user(request)
+    if not u:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return user_public(u)
+
+@api.post("/auth/logout")
+async def logout(request: Request, response: Response):
+    token = request.cookies.get('session_token')
+    if token:
+        await db.sessions.delete_one({'session_token': token})
+    response.delete_cookie('session_token', path='/')
+    return {"ok": True}
+
+# ==================== PRODUCT ROUTES ====================
+
+@api.get("/products")
+async def list_products():
+    docs = await db.products.find({}, {'_id': 0}).to_list(500)
+    return docs
+
+@api.get("/products/{slug}")
+async def get_product(slug: str):
+    p = await db.products.find_one({'slug': slug}, {'_id': 0})
+    if not p:
+        raise HTTPException(status_code=404, detail="Not found")
+    return p
+
+@api.patch("/admin/products/{slug}/variants/{variant_id}/stock")
+async def update_variant_stock(slug: str, variant_id: str, payload: UpdateStockPayload, _user=Depends(require_admin_or_staff)):
+    p = await db.products.find_one({'slug': slug})
+    if not p:
+        raise HTTPException(status_code=404, detail="Not found")
+    variants = p['variants']
+    for v in variants:
+        if v['id'] == variant_id:
+            v['stock'] = max(0, int(payload.stock))
+            break
+    await db.products.update_one({'slug': slug}, {'$set': {'variants': variants}})
+    return {"ok": True}
+
+# ==================== ORDER ROUTES ====================
+
+def calc_totals(items_resolved):
+    subtotal = sum(i['price'] * i['qty'] for i in items_resolved)
+    delivery = 100 if subtotal < 200 else 0
+    total = subtotal + delivery
+    return subtotal, delivery, total
+
+async def resolve_items(items: List[CartItem]):
+    resolved = []
+    for it in items:
+        p = await db.products.find_one({'slug': it.slug}, {'_id': 0})
+        if not p:
+            raise HTTPException(status_code=400, detail=f"Product {it.slug} not found")
+        variant = next((v for v in p['variants'] if v['id'] == it.variant_id), None)
+        if not variant:
+            raise HTTPException(status_code=400, detail=f"Variant {it.variant_id} not found")
+        resolved.append({
+            'slug': p['slug'], 'name': p['name'], 'image': p['image'],
+            'variant_id': variant['id'], 'variant_label': variant['label'],
+            'price': variant['price'], 'qty': it.qty,
+        })
+    return resolved
+
+@api.post("/orders/create")
+async def create_order(payload: OrderCreatePayload, request: Request):
+    user = await get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in to place order")
+    if not payload.items:
+        raise HTTPException(status_code=400, detail="Cart empty")
+    items = await resolve_items(payload.items)
+    subtotal, delivery, total = calc_totals(items)
+    order_id = uuid.uuid4().hex[:8]
+    order_doc = {
+        'order_id': order_id,
+        'user_id': user['user_id'],
+        'customer_email': user['email'],
+        'customer_name': user.get('name', ''),
+        'address': payload.address.dict(),
+        'items': items,
+        'subtotal': subtotal,
+        'delivery_charge': delivery,
+        'total': total,
+        'payment_method': payload.payment_method,
+        'payment_status': 'pending',
+        'status': 'Placed',
+        'assigned_staff_id': None,
+        'assigned_staff_name': None,
+        'created_at': now_utc(),
+    }
+
+    if payload.payment_method == 'razorpay':
+        rzp_order = rzp.order.create({
+            'amount': total * 100,  # paise
+            'currency': 'INR',
+            'receipt': f"rf_{order_id}",
+            'payment_capture': 1,
+            'notes': {'internal_order_id': order_id, 'email': user['email']},
+        })
+        order_doc['razorpay_order_id'] = rzp_order['id']
+        await db.orders.insert_one(order_doc)
+        return {
+            'order_id': order_id,
+            'razorpay_order_id': rzp_order['id'],
+            'amount': total * 100,
+            'currency': 'INR',
+            'key_id': RZP_KEY_ID,
+            'subtotal': subtotal, 'delivery': delivery, 'total': total,
+        }
+    else:  # cod
+        order_doc['payment_status'] = 'Cod Pending'
+        await db.orders.insert_one(order_doc)
+        # decrement stock
+        await decrement_stock(items)
+        return {'order_id': order_id, 'total': total, 'payment_method': 'cod', 'subtotal': subtotal, 'delivery': delivery}
+
+async def decrement_stock(items):
+    for it in items:
+        p = await db.products.find_one({'slug': it['slug']})
+        if not p:
+            continue
+        variants = p['variants']
+        for v in variants:
+            if v['id'] == it['variant_id']:
+                v['stock'] = max(0, v['stock'] - it['qty'])
+        await db.products.update_one({'slug': it['slug']}, {'$set': {'variants': variants}})
+
+@api.post("/orders/verify")
+async def verify_payment(payload: PaymentVerifyPayload, request: Request):
+    user = await get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in required")
+    order = await db.orders.find_one({'order_id': payload.order_id})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    body = f"{payload.razorpay_order_id}|{payload.razorpay_payment_id}"
+    expected = hmac.new(RZP_KEY_SECRET.encode(), body.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, payload.razorpay_signature):
+        await db.orders.update_one({'order_id': payload.order_id}, {'$set': {'payment_status': 'Failed'}})
+        raise HTTPException(status_code=400, detail="Payment signature invalid")
+    await db.orders.update_one(
+        {'order_id': payload.order_id},
+        {'$set': {
+            'payment_status': 'Paid',
+            'razorpay_payment_id': payload.razorpay_payment_id,
+            'razorpay_signature': payload.razorpay_signature,
+            'paid_at': now_utc(),
+        }},
+    )
+    await decrement_stock(order['items'])
+    return {"ok": True, "order_id": payload.order_id}
+
+@api.get("/orders/my")
+async def my_orders(request: Request):
+    user = await require_user(request)
+    docs = await db.orders.find({'user_id': user['user_id']}, {'_id': 0}).sort('created_at', -1).to_list(200)
+    return docs
+
+@api.get("/orders/{order_id}")
+async def get_order(order_id: str, request: Request):
+    user = await require_user(request)
+    doc = await db.orders.find_one({'order_id': order_id}, {'_id': 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Not found")
+    if user['role'] not in ('admin', 'staff') and doc['user_id'] != user['user_id']:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return doc
+
+# ==================== ADMIN ROUTES ====================
+
+@api.get("/admin/stats")
+async def admin_stats(_u=Depends(require_admin_or_staff)):
+    orders = await db.orders.find({}, {'_id': 0}).to_list(2000)
+    revenue = sum(o['total'] for o in orders if o.get('payment_status') == 'Paid')
+    pending = sum(1 for o in orders if o.get('status') not in ('Delivered', 'Cancelled'))
+    products_count = await db.products.count_documents({})
+    customers_count = await db.users.count_documents({'role': 'customer'})
+    return {
+        'revenue': revenue,
+        'orders': len(orders),
+        'pending': pending,
+        'products': products_count,
+        'customers': customers_count,
+    }
+
+@api.get("/admin/orders")
+async def admin_orders(_u=Depends(require_admin_or_staff)):
+    docs = await db.orders.find({}, {'_id': 0}).sort('created_at', -1).to_list(2000)
+    return docs
+
+@api.patch("/admin/orders/{order_id}")
+async def admin_update_order(order_id: str, payload: UpdateOrderPayload, _u=Depends(require_admin_or_staff)):
+    order = await db.orders.find_one({'order_id': order_id})
+    if not order:
+        raise HTTPException(status_code=404, detail="Not found")
+    update = {}
+    if payload.status:
+        update['status'] = payload.status
+        if payload.status == 'Delivered' and order.get('payment_method') == 'cod':
+            update['payment_status'] = 'Paid'
+    if payload.assigned_staff_id is not None:
+        if payload.assigned_staff_id == '':
+            update['assigned_staff_id'] = None
+            update['assigned_staff_name'] = None
+        else:
+            staff = await db.users.find_one({'user_id': payload.assigned_staff_id})
+            if not staff:
+                raise HTTPException(status_code=400, detail="Staff not found")
+            update['assigned_staff_id'] = staff['user_id']
+            update['assigned_staff_name'] = staff['name']
+    if update:
+        await db.orders.update_one({'order_id': order_id}, {'$set': update})
+    doc = await db.orders.find_one({'order_id': order_id}, {'_id': 0})
+    return doc
+
+@api.get("/admin/customers")
+async def admin_customers(_u=Depends(require_admin_or_staff)):
+    users = await db.users.find({'role': 'customer'}, {'_id': 0, 'password_hash': 0}).to_list(2000)
+    orders = await db.orders.find({}, {'_id': 0}).to_list(5000)
+    out = []
+    for u in users:
+        u_orders = [o for o in orders if o['user_id'] == u['user_id']]
+        spent = sum(o['total'] for o in u_orders if o.get('payment_status') == 'Paid')
+        out.append({
+            'user_id': u['user_id'],
+            'name': u.get('name', ''),
+            'email': u['email'],
+            'phone': u.get('phone', '') or '—',
+            'orders': len(u_orders),
+            'total_spent': spent,
+        })
+    return out
+
+@api.get("/admin/staff")
+async def admin_staff_list(_u=Depends(require_admin_or_staff)):
+    users = await db.users.find({'role': {'$in': ['admin', 'staff']}}, {'_id': 0, 'password_hash': 0}).to_list(500)
+    return [{'user_id': u['user_id'], 'name': u['name'], 'email': u['email'],
+             'role': u['role'].capitalize(), 'phone': u.get('phone', '') or '—'} for u in users]
+
+@api.post("/admin/staff")
+async def admin_staff_create(payload: StaffCreatePayload, _u=Depends(require_admin)):
+    email = payload.email.lower()
+    if await db.users.find_one({'email': email}):
+        raise HTTPException(status_code=400, detail="Email already exists")
+    if payload.role not in ('staff', 'admin'):
+        raise HTTPException(status_code=400, detail="Invalid role")
+    doc = {
+        'user_id': f"user_{uuid.uuid4().hex[:12]}",
+        'email': email,
+        'name': payload.name,
+        'phone': payload.phone or '',
+        'role': payload.role,
+        'password_hash': hash_password(payload.password),
+        'created_at': now_utc(),
+        'provider': 'email',
+    }
+    await db.users.insert_one(doc)
+    return {'user_id': doc['user_id'], 'name': doc['name'], 'email': doc['email'],
+            'role': doc['role'].capitalize(), 'phone': doc['phone'] or '—'}
+
+@api.delete("/admin/staff/{user_id}")
+async def admin_staff_delete(user_id: str, current=Depends(require_admin)):
+    if user_id == current['user_id']:
+        raise HTTPException(status_code=400, detail="Cannot delete yourself")
+    r = await db.users.delete_one({'user_id': user_id, 'role': {'$in': ['admin', 'staff']}})
+    if r.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"ok": True}
+
+# ==================== APP SETUP ====================
+
+app.include_router(api)
 
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()

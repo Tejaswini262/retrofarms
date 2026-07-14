@@ -1,6 +1,5 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { useApp } from '../context/AppContext';
 
 const GoogleIcon = () => (
   <svg width="20" height="20" viewBox="0 0 48 48" aria-hidden="true">
@@ -11,18 +10,13 @@ const GoogleIcon = () => (
   </svg>
 );
 
+// REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
 const Login = () => {
-  const { loginWithGoogle } = useApp();
-  const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
 
   const handleGoogle = () => {
-    setLoading(true);
-    setTimeout(() => {
-      loginWithGoogle();
-      setLoading(false);
-      navigate('/');
-    }, 700);
+    const redirectUrl = window.location.origin + '/';
+    window.location.href = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUrl)}`;
   };
 
   return (
@@ -33,42 +27,20 @@ const Login = () => {
         <p className="text-sm text-[#7A6A55] text-center mb-8">
           Track your orders, save your kitchen list, checkout faster.
         </p>
-
         <button
           onClick={handleGoogle}
-          disabled={loading}
-          className="w-full flex items-center justify-center gap-3 border border-[#E4D9C1] hover:border-[#2B1D11] text-[#2B1D11] rounded-full py-3 mb-6 transition-colors bg-white disabled:opacity-70"
+          className="w-full flex items-center justify-center gap-3 border border-[#E4D9C1] hover:border-[#2B1D11] text-[#2B1D11] rounded-full py-3 mb-6 transition-colors bg-white"
         >
           <GoogleIcon />
-          {loading ? 'Signing you in…' : 'Continue with Google'}
+          Continue with Google
         </button>
-
-        <div className="flex items-center gap-3 mb-6">
-          <div className="flex-1 h-px bg-[#E4D9C1]" />
-          <span className="text-xs text-[#7A6A55]">OR</span>
-          <div className="flex-1 h-px bg-[#E4D9C1]" />
-        </div>
-
-        <div className="space-y-3">
-          <input
-            type="email"
-            placeholder="Email address"
-            className="w-full px-4 py-3 border border-[#E4D9C1] rounded-xl focus:outline-none focus:border-[#2B1D11] bg-white text-[#2B1D11]"
-          />
-          <input
-            type="password"
-            placeholder="Password"
-            className="w-full px-4 py-3 border border-[#E4D9C1] rounded-xl focus:outline-none focus:border-[#2B1D11] bg-white text-[#2B1D11]"
-          />
-          <button className="w-full bg-[#2B1D11] hover:bg-[#3A2818] text-[#F7F1E5] rounded-full py-3 transition-colors">
-            Sign in
-          </button>
-        </div>
-
-        <div className="text-center mt-6 text-sm text-[#7A6A55]">
+        <div className="text-center mt-4 text-sm text-[#7A6A55]">
           Are you a farm admin?{' '}
           <Link to="/admin/login" className="text-[#C96C1B] hover:underline">Admin login</Link>
         </div>
+        <button onClick={() => navigate('/')} className="block mx-auto mt-6 text-xs text-[#7A6A55] hover:text-[#2B1D11]">
+          ← Continue browsing
+        </button>
       </div>
     </div>
   );

@@ -1,5 +1,10 @@
 import React from 'react';
-import { FARMERS } from '../data/mock';
+
+const FARMERS = [
+  { initials: 'V', name: 'Dr. Venkat', creds: 'M.Sc, Ph.D in Chemistry', role: 'Founder & Farm Director' },
+  { initials: 'AR', name: 'Mr. Avudoddi Ramakrishna', creds: 'MBA', role: 'Operations & Distribution' },
+  { initials: 'AM', name: 'Mr. Avudoddi Mallikarjun', creds: 'M.Sc, Ph.D in Chemistry', role: 'Livestock & Nutrition Lead' },
+];
 
 const Farmers = () => (
   <div className="bg-[#F7F1E5] min-h-screen">
