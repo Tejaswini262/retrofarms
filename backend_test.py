@@ -765,6 +765,491 @@ def test_delivery_charge_logic():
     # Just add a summary
     result.add_pass("Delivery charge logic", "Verified in order creation tests (< ₹200 → ₹100, ≥ ₹200 → ₹0)")
 
+# ==================== NEW ENDPOINTS TESTS ====================
+
+def test_offline_order_without_auth():
+    """Test 30: POST /api/admin/orders/offline without auth returns 401"""
+    try:
+        payload = {
+            "customer_name": "Walk-in Customer",
+            "customer_phone": "9999911111",
+            "customer_email": "",
+            "items": [{"slug": "green-chilli", "variant_id": "250g", "qty": 2}],
+            "payment_method": "cash",
+            "payment_status": "Paid",
+            "notes": "Cash paid at farm",
+            "status": "Placed"
+        }
+        resp = requests.post(f"{BASE_URL}/admin/orders/offline", json=payload, timeout=10)
+        if resp.status_code == 401:
+            result.add_pass("Offline order without auth (401)", "Correctly returns 401")
+        else:
+            result.add_fail("Offline order without auth (401)", f"Expected 401, got {resp.status_code}")
+    except Exception as e:
+        result.add_fail("Offline order without auth (401)", str(e))
+
+def test_offline_order_admin():
+    """Test 31: POST /api/admin/orders/offline with admin session"""
+    if not admin_session:
+        result.add_fail("Offline order (admin)", "No admin session available")
+        return
+    
+    try:
+        payload = {
+            "customer_name": "Ramesh Patel",
+            "customer_phone": "9999911111",
+            "customer_email": "",
+            "items": [{"slug": "green-chilli", "variant_id": "250g", "qty": 2}],
+            "payment_method": "cash",
+            "payment_status": "Paid",
+            "notes": "Cash paid at farm",
+            "status": "Placed"
+        }
+        resp = requests.post(
+            f"{BASE_URL}/admin/orders/offline",
+            json=payload,
+            cookies={"session_token": admin_session},
+            timeout=10
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            # green-chilli 250g is ₹30, qty=2 → subtotal=₹60, delivery=₹100, total=₹160
+            if (data.get("source") == "offline" and
+                "order_id" in data and
+                data.get("subtotal") == 60 and
+                data.get("delivery_charge") == 100 and
+                data.get("total") == 160 and
+                data.get("customer_email") == "offline_9999911111@retrofarms.offline"):
+                result.add_pass("Offline order (admin)", 
+                    f"Order {data['order_id']}: source=offline, total=₹160, email={data['customer_email']}")
+            else:
+                result.add_fail("Offline order (admin)", f"Incorrect data: {data}")
+        else:
+            result.add_fail("Offline order (admin)", f"Status {resp.status_code}: {resp.text}")
+    except Exception as e:
+        result.add_fail("Offline order (admin)", str(e))
+
+def test_offline_order_staff():
+    """Test 32: POST /api/admin/orders/offline with staff session"""
+    if not staff_session:
+        result.add_fail("Offline order (staff)", "No staff session available")
+        return
+    
+    try:
+        payload = {
+            "customer_name": "Suresh Kumar",
+            "customer_phone": "9999922222",
+            "customer_email": "",
+            "items": [{"slug": "green-chilli", "variant_id": "250g", "qty": 1}],
+            "payment_method": "cash",
+            "payment_status": "Paid",
+            "notes": "Staff sale",
+            "status": "Placed"
+        }
+        resp = requests.post(
+            f"{BASE_URL}/admin/orders/offline",
+            json=payload,
+            cookies={"session_token": staff_session},
+            timeout=10
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("source") == "offline" and "order_id" in data:
+                result.add_pass("Offline order (staff)", f"Order {data['order_id']}: source=offline")
+            else:
+                result.add_fail("Offline order (staff)", f"Incorrect data: {data}")
+        else:
+            result.add_fail("Offline order (staff)", f"Status {resp.status_code}: {resp.text}")
+    except Exception as e:
+        result.add_fail("Offline order (staff)", str(e))
+
+def test_offline_order_in_list():
+    """Test 33: Verify offline order appears in GET /api/admin/orders"""
+    if not admin_session:
+        result.add_fail("Offline order in list", "No admin session available")
+        return
+    
+    try:
+        resp = requests.get(
+            f"{BASE_URL}/admin/orders",
+            cookies={"session_token": admin_session},
+            timeout=10
+        )
+        if resp.status_code == 200:
+            orders = resp.json()
+            offline_orders = [o for o in orders if o.get("source") == "offline"]
+            if offline_orders:
+                result.add_pass("Offline order in list", f"Found {len(offline_orders)} offline orders")
+            else:
+                result.add_fail("Offline order in list", "No offline orders found in list")
+        else:
+            result.add_fail("Offline order in list", f"Status {resp.status_code}: {resp.text}")
+    except Exception as e:
+        result.add_fail("Offline order in list", str(e))
+
+def test_product_create():
+    """Test 34: POST /api/admin/products creates new product"""
+    if not admin_session:
+        result.add_fail("Product create", "No admin session available")
+        return
+    
+    try:
+        payload = {
+            "slug": "test-honey",
+            "name": "Farm Honey",
+            "category": "fruits",
+            "image": "https://example.com/honey.jpg",
+            "from_price": 300,
+            "description": "Raw wild honey",
+            "variants": [{"id": "500g", "label": "500 g jar", "price": 300, "stock": 20}]
+        }
+        resp = requests.post(
+            f"{BASE_URL}/admin/products",
+            json=payload,
+            cookies={"session_token": admin_session},
+            timeout=10
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("slug") == "test-honey" and data.get("name") == "Farm Honey":
+                result.add_pass("Product create", f"Created product: {data['slug']}")
+            else:
+                result.add_fail("Product create", f"Incorrect data: {data}")
+        else:
+            result.add_fail("Product create", f"Status {resp.status_code}: {resp.text}")
+    except Exception as e:
+        result.add_fail("Product create", str(e))
+
+def test_product_create_duplicate():
+    """Test 35: POST /api/admin/products with duplicate slug returns 400"""
+    if not admin_session:
+        result.add_fail("Product create duplicate (400)", "No admin session available")
+        return
+    
+    try:
+        payload = {
+            "slug": "test-honey",
+            "name": "Another Honey",
+            "category": "fruits",
+            "image": "https://example.com/honey2.jpg",
+            "from_price": 350,
+            "description": "Another honey",
+            "variants": [{"id": "1kg", "label": "1 kg jar", "price": 600, "stock": 10}]
+        }
+        resp = requests.post(
+            f"{BASE_URL}/admin/products",
+            json=payload,
+            cookies={"session_token": admin_session},
+            timeout=10
+        )
+        if resp.status_code == 400:
+            result.add_pass("Product create duplicate (400)", "Correctly returns 400")
+        else:
+            result.add_fail("Product create duplicate (400)", f"Expected 400, got {resp.status_code}")
+    except Exception as e:
+        result.add_fail("Product create duplicate (400)", str(e))
+
+def test_product_get():
+    """Test 36: GET /api/products/test-honey returns created product"""
+    try:
+        resp = requests.get(f"{BASE_URL}/products/test-honey", timeout=10)
+        if resp.status_code == 200:
+            product = resp.json()
+            if product.get("slug") == "test-honey" and product.get("name") == "Farm Honey":
+                result.add_pass("Product get (test-honey)", f"Found product: {product['name']}")
+            else:
+                result.add_fail("Product get (test-honey)", f"Incorrect data: {product}")
+        else:
+            result.add_fail("Product get (test-honey)", f"Status {resp.status_code}: {resp.text}")
+    except Exception as e:
+        result.add_fail("Product get (test-honey)", str(e))
+
+def test_product_update():
+    """Test 37: PUT /api/admin/products/test-honey updates product"""
+    if not admin_session:
+        result.add_fail("Product update", "No admin session available")
+        return
+    
+    try:
+        payload = {
+            "name": "Wild Forest Honey",
+            "from_price": 350
+        }
+        resp = requests.put(
+            f"{BASE_URL}/admin/products/test-honey",
+            json=payload,
+            cookies={"session_token": admin_session},
+            timeout=10
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("name") == "Wild Forest Honey" and data.get("from_price") == 350:
+                result.add_pass("Product update", f"Updated: name={data['name']}, from_price=₹{data['from_price']}")
+            else:
+                result.add_fail("Product update", f"Update not reflected: {data}")
+        else:
+            result.add_fail("Product update", f"Status {resp.status_code}: {resp.text}")
+    except Exception as e:
+        result.add_fail("Product update", str(e))
+
+def test_product_update_verify():
+    """Test 38: GET /api/products/test-honey verifies update"""
+    try:
+        resp = requests.get(f"{BASE_URL}/products/test-honey", timeout=10)
+        if resp.status_code == 200:
+            product = resp.json()
+            if product.get("name") == "Wild Forest Honey" and product.get("from_price") == 350:
+                result.add_pass("Product update verify", "Update confirmed")
+            else:
+                result.add_fail("Product update verify", f"Update not persisted: {product}")
+        else:
+            result.add_fail("Product update verify", f"Status {resp.status_code}: {resp.text}")
+    except Exception as e:
+        result.add_fail("Product update verify", str(e))
+
+def test_variant_add():
+    """Test 39: POST /api/admin/products/test-honey/variants adds variant"""
+    if not admin_session:
+        result.add_fail("Variant add", "No admin session available")
+        return
+    
+    try:
+        payload = {
+            "id": "1kg",
+            "label": "1 kg jar",
+            "price": 580,
+            "stock": 10
+        }
+        resp = requests.post(
+            f"{BASE_URL}/admin/products/test-honey/variants",
+            json=payload,
+            cookies={"session_token": admin_session},
+            timeout=10
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            variants = data.get("variants", [])
+            if any(v.get("id") == "1kg" for v in variants):
+                result.add_pass("Variant add", "Added variant: 1kg")
+            else:
+                result.add_fail("Variant add", f"Variant not added: {variants}")
+        else:
+            result.add_fail("Variant add", f"Status {resp.status_code}: {resp.text}")
+    except Exception as e:
+        result.add_fail("Variant add", str(e))
+
+def test_variant_update():
+    """Test 40: PATCH /api/admin/products/test-honey/variants/1kg updates variant"""
+    if not admin_session:
+        result.add_fail("Variant update", "No admin session available")
+        return
+    
+    try:
+        payload = {
+            "price": 600,
+            "stock": 15
+        }
+        resp = requests.patch(
+            f"{BASE_URL}/admin/products/test-honey/variants/1kg",
+            json=payload,
+            cookies={"session_token": admin_session},
+            timeout=10
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            variants = data.get("variants", [])
+            variant_1kg = next((v for v in variants if v.get("id") == "1kg"), None)
+            if variant_1kg and variant_1kg.get("price") == 600 and variant_1kg.get("stock") == 15:
+                result.add_pass("Variant update", "Updated: price=₹600, stock=15")
+            else:
+                result.add_fail("Variant update", f"Update not reflected: {variant_1kg}")
+        else:
+            result.add_fail("Variant update", f"Status {resp.status_code}: {resp.text}")
+    except Exception as e:
+        result.add_fail("Variant update", str(e))
+
+def test_variant_delete():
+    """Test 41: DELETE /api/admin/products/test-honey/variants/500g removes variant"""
+    if not admin_session:
+        result.add_fail("Variant delete", "No admin session available")
+        return
+    
+    try:
+        resp = requests.delete(
+            f"{BASE_URL}/admin/products/test-honey/variants/500g",
+            cookies={"session_token": admin_session},
+            timeout=10
+        )
+        if resp.status_code == 200:
+            # Verify variant is removed
+            get_resp = requests.get(f"{BASE_URL}/products/test-honey", timeout=10)
+            if get_resp.status_code == 200:
+                product = get_resp.json()
+                variants = product.get("variants", [])
+                if not any(v.get("id") == "500g" for v in variants):
+                    result.add_pass("Variant delete", "Removed variant: 500g")
+                else:
+                    result.add_fail("Variant delete", "Variant still exists")
+            else:
+                result.add_fail("Variant delete", "Could not verify deletion")
+        else:
+            result.add_fail("Variant delete", f"Status {resp.status_code}: {resp.text}")
+    except Exception as e:
+        result.add_fail("Variant delete", str(e))
+
+def test_product_delete():
+    """Test 42: DELETE /api/admin/products/test-honey removes product"""
+    if not admin_session:
+        result.add_fail("Product delete", "No admin session available")
+        return
+    
+    try:
+        resp = requests.delete(
+            f"{BASE_URL}/admin/products/test-honey",
+            cookies={"session_token": admin_session},
+            timeout=10
+        )
+        if resp.status_code == 200:
+            result.add_pass("Product delete", "Deleted product: test-honey")
+        else:
+            result.add_fail("Product delete", f"Status {resp.status_code}: {resp.text}")
+    except Exception as e:
+        result.add_fail("Product delete", str(e))
+
+def test_product_delete_verify():
+    """Test 43: GET /api/products/test-honey returns 404 after deletion"""
+    try:
+        resp = requests.get(f"{BASE_URL}/products/test-honey", timeout=10)
+        if resp.status_code == 404:
+            result.add_pass("Product delete verify (404)", "Product not found after deletion")
+        else:
+            result.add_fail("Product delete verify (404)", f"Expected 404, got {resp.status_code}")
+    except Exception as e:
+        result.add_fail("Product delete verify (404)", str(e))
+
+def test_staff_cannot_create_product():
+    """Test 44: Staff role should get 403 when trying to create product"""
+    if not staff_session:
+        result.add_fail("Staff cannot create product (403)", "No staff session available")
+        return
+    
+    try:
+        payload = {
+            "slug": "staff-test",
+            "name": "Staff Test",
+            "category": "fruits",
+            "image": "https://example.com/test.jpg",
+            "from_price": 100,
+            "description": "Should fail",
+            "variants": [{"id": "1kg", "label": "1 kg", "price": 100, "stock": 10}]
+        }
+        resp = requests.post(
+            f"{BASE_URL}/admin/products",
+            json=payload,
+            cookies={"session_token": staff_session},
+            timeout=10
+        )
+        if resp.status_code == 403:
+            result.add_pass("Staff cannot create product (403)", "Correctly returns 403")
+        else:
+            result.add_fail("Staff cannot create product (403)", f"Expected 403, got {resp.status_code}")
+    except Exception as e:
+        result.add_fail("Staff cannot create product (403)", str(e))
+
+def test_staff_cannot_update_product():
+    """Test 45: Staff role should get 403 when trying to update product"""
+    if not staff_session:
+        result.add_fail("Staff cannot update product (403)", "No staff session available")
+        return
+    
+    try:
+        payload = {"name": "Should Fail"}
+        resp = requests.put(
+            f"{BASE_URL}/admin/products/country-eggs",
+            json=payload,
+            cookies={"session_token": staff_session},
+            timeout=10
+        )
+        if resp.status_code == 403:
+            result.add_pass("Staff cannot update product (403)", "Correctly returns 403")
+        else:
+            result.add_fail("Staff cannot update product (403)", f"Expected 403, got {resp.status_code}")
+    except Exception as e:
+        result.add_fail("Staff cannot update product (403)", str(e))
+
+def test_staff_cannot_delete_product():
+    """Test 46: Staff role should get 403 when trying to delete product"""
+    if not staff_session:
+        result.add_fail("Staff cannot delete product (403)", "No staff session available")
+        return
+    
+    try:
+        resp = requests.delete(
+            f"{BASE_URL}/admin/products/country-eggs",
+            cookies={"session_token": staff_session},
+            timeout=10
+        )
+        if resp.status_code == 403:
+            result.add_pass("Staff cannot delete product (403)", "Correctly returns 403")
+        else:
+            result.add_fail("Staff cannot delete product (403)", f"Expected 403, got {resp.status_code}")
+    except Exception as e:
+        result.add_fail("Staff cannot delete product (403)", str(e))
+
+def test_regression_products_list():
+    """Test 47: Regression - GET /api/products still returns 11+ products"""
+    try:
+        resp = requests.get(f"{BASE_URL}/products", timeout=10)
+        if resp.status_code == 200:
+            products = resp.json()
+            if isinstance(products, list) and len(products) >= 11:
+                result.add_pass("Regression: Products list", f"Found {len(products)} products")
+            else:
+                result.add_fail("Regression: Products list", f"Expected 11+ products, got {len(products)}")
+        else:
+            result.add_fail("Regression: Products list", f"Status {resp.status_code}: {resp.text}")
+    except Exception as e:
+        result.add_fail("Regression: Products list", str(e))
+
+def test_regression_admin_login():
+    """Test 48: Regression - POST /api/auth/admin-login still works"""
+    try:
+        resp = requests.post(
+            f"{BASE_URL}/auth/admin-login",
+            json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD},
+            timeout=10
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("role") == "admin":
+                result.add_pass("Regression: Admin login", "Still working")
+            else:
+                result.add_fail("Regression: Admin login", f"Unexpected response: {data}")
+        else:
+            result.add_fail("Regression: Admin login", f"Status {resp.status_code}: {resp.text}")
+    except Exception as e:
+        result.add_fail("Regression: Admin login", str(e))
+
+def test_regression_inventory_update():
+    """Test 49: Regression - PATCH /api/admin/products/country-eggs/variants/dozen/stock still works"""
+    if not admin_session:
+        result.add_fail("Regression: Inventory update", "No admin session available")
+        return
+    
+    try:
+        resp = requests.patch(
+            f"{BASE_URL}/admin/products/country-eggs/variants/dozen/stock",
+            json={"stock": 200},
+            cookies={"session_token": admin_session},
+            timeout=10
+        )
+        if resp.status_code == 200:
+            result.add_pass("Regression: Inventory update", "Still working")
+        else:
+            result.add_fail("Regression: Inventory update", f"Status {resp.status_code}: {resp.text}")
+    except Exception as e:
+        result.add_fail("Regression: Inventory update", str(e))
+
 def main():
     print("="*80)
     print("RETRO FARMS BACKEND API TEST SUITE")
@@ -803,6 +1288,36 @@ def main():
     test_admin_stats_after_orders()
     test_payment_verify_invalid_signature()
     test_delivery_charge_logic()
+    
+    # NEW ENDPOINTS TESTS
+    print("\n" + "="*80)
+    print("TESTING NEW ENDPOINTS (Offline Orders + Product CRUD)")
+    print("="*80)
+    test_offline_order_without_auth()
+    test_offline_order_admin()
+    test_offline_order_staff()
+    test_offline_order_in_list()
+    test_product_create()
+    test_product_create_duplicate()
+    test_product_get()
+    test_product_update()
+    test_product_update_verify()
+    test_variant_add()
+    test_variant_update()
+    test_variant_delete()
+    test_product_delete()
+    test_product_delete_verify()
+    test_staff_cannot_create_product()
+    test_staff_cannot_update_product()
+    test_staff_cannot_delete_product()
+    
+    # REGRESSION TESTS
+    print("\n" + "="*80)
+    print("REGRESSION TESTS")
+    print("="*80)
+    test_regression_products_list()
+    test_regression_admin_login()
+    test_regression_inventory_update()
     
     # Print summary
     success = result.summary()

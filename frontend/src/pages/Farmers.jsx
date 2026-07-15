@@ -1,9 +1,24 @@
 import React from 'react';
 
 const FARMERS = [
-  { initials: 'V', name: 'Dr. Venkat', creds: 'M.Sc, Ph.D in Chemistry', role: 'Founder & Farm Director' },
-  { initials: 'AR', name: 'Mr. Avudoddi Ramakrishna', creds: 'MBA', role: 'Operations & Distribution' },
-  { initials: 'AM', name: 'Mr. Avudoddi Mallikarjun', creds: 'M.Sc, Ph.D in Chemistry', role: 'Livestock & Nutrition Lead' },
+  {
+    name: 'Dr. Venkat',
+    creds: 'M.Sc, Ph.D in Chemistry',
+    role: 'Founder & Farm Director',
+    photo: 'https://customer-assets-39nsmqrw.emergentagent.net/job_farm-to-table-541/artifacts/t0o5gwzu_Dr.Avudoddi.Venkat.jpeg',
+  },
+  {
+    name: 'Mr. Avudoddi Ramakrishna',
+    creds: 'MBA',
+    role: 'Operations & Distribution',
+    photo: 'https://customer-assets-39nsmqrw.emergentagent.net/job_farm-to-table-541/artifacts/51ekxg06_Avudoddi.Ramakrishna.jpeg',
+  },
+  {
+    name: 'Mr. Avudoddi Mallikarjun',
+    creds: 'M.Sc, Ph.D in Chemistry',
+    role: 'Livestock & Nutrition Lead',
+    photo: 'https://customer-assets-39nsmqrw.emergentagent.net/job_farm-to-table-541/artifacts/2qghb75g_Avudoddi.Mallikarjun.jpeg',
+  },
 ];
 
 const Farmers = () => (
@@ -17,15 +32,17 @@ const Farmers = () => (
         Retro Farms is run by scientists-turned-farmers who bring a lab-honed obsession for quality to every egg, every bird and every harvest.
       </p>
 
-      <div className="grid md:grid-cols-3 gap-6 mb-24">
+      <div className="grid md:grid-cols-3 gap-8 mb-24">
         {FARMERS.map((f) => (
-          <div key={f.name} className="bg-white rounded-2xl p-8 border border-[#E4D9C1] shadow-sm">
-            <div className="w-20 h-20 rounded-full bg-[#EFE4CB] border-2 border-[#5C3B1E] flex items-center justify-center font-serif text-2xl text-[#2B1D11] mb-6">
-              {f.initials}
+          <div key={f.name} className="bg-white rounded-2xl overflow-hidden border border-[#E4D9C1] shadow-sm">
+            <div className="aspect-[4/5] overflow-hidden bg-[#EFE4CB]">
+              <img src={f.photo} alt={f.name} className="w-full h-full object-cover" loading="lazy" />
             </div>
-            <h3 className="font-serif text-2xl text-[#2B1D11] mb-1">{f.name}</h3>
-            <div className="text-sm text-[#7A6A55] mb-3">{f.creds}</div>
-            <div className="inline-block px-3 py-1 rounded-full bg-[#EFE4CB] text-xs text-[#4E6A3C]">{f.role}</div>
+            <div className="p-6">
+              <h3 className="font-serif text-2xl text-[#2B1D11] mb-1">{f.name}</h3>
+              <div className="text-sm text-[#7A6A55] mb-3">{f.creds}</div>
+              <div className="inline-block px-3 py-1 rounded-full bg-[#EFE4CB] text-xs text-[#4E6A3C]">{f.role}</div>
+            </div>
           </div>
         ))}
       </div>

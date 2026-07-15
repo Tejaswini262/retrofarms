@@ -178,6 +178,49 @@ class StaffCreatePayload(BaseModel):
     password: str
     role: str = 'staff'  # 'staff' or 'admin'
 
+class OfflineOrderItem(BaseModel):
+    slug: str
+    variant_id: str
+    qty: int
+
+class OfflineOrderPayload(BaseModel):
+    customer_name: str
+    customer_phone: str
+    customer_email: Optional[str] = ''
+    items: List[OfflineOrderItem]
+    address: Optional[Dict[str, Any]] = None
+    payment_method: str = 'offline'  # offline / cash / upi / bank
+    payment_status: str = 'Paid'
+    notes: Optional[str] = ''
+    status: str = 'Placed'
+
+class VariantInput(BaseModel):
+    id: str
+    label: str
+    price: int
+    stock: int = 0
+
+class ProductCreatePayload(BaseModel):
+    slug: str
+    name: str
+    category: str
+    image: str
+    from_price: int
+    description: str
+    variants: List[VariantInput]
+
+class ProductUpdatePayload(BaseModel):
+    name: Optional[str] = None
+    category: Optional[str] = None
+    image: Optional[str] = None
+    from_price: Optional[int] = None
+    description: Optional[str] = None
+
+class VariantUpdatePayload(BaseModel):
+    label: Optional[str] = None
+    price: Optional[int] = None
+    stock: Optional[int] = None
+
 # ==================== HELPERS ====================
 
 def now_utc():
@@ -628,6 +671,157 @@ async def admin_staff_delete(user_id: str, current=Depends(require_admin)):
     r = await db.users.delete_one({'user_id': user_id, 'role': {'$in': ['admin', 'staff']}})
     if r.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Not found")
+    return {"ok": True}
+
+# ==================== OFFLINE ORDERS ====================
+
+@api.post("/admin/orders/offline")
+async def create_offline_order(payload: OfflineOrderPayload, current=Depends(require_admin_or_staff)):
+    if not payload.items:
+        raise HTTPException(status_code=400, detail="Items required")
+    items = []
+    for it in payload.items:
+        p = await db.products.find_one({'slug': it.slug}, {'_id': 0})
+        if not p:
+            raise HTTPException(status_code=400, detail=f"Product {it.slug} not found")
+        variant = next((v for v in p['variants'] if v['id'] == it.variant_id), None)
+        if not variant:
+            raise HTTPException(status_code=400, detail=f"Variant {it.variant_id} not found")
+        items.append({
+            'slug': p['slug'], 'name': p['name'], 'image': p['image'],
+            'variant_id': variant['id'], 'variant_label': variant['label'],
+            'price': variant['price'], 'qty': it.qty,
+        })
+    subtotal, delivery, total = calc_totals(items)
+
+    # Find or create pseudo customer user
+    email = (payload.customer_email or '').lower().strip()
+    if not email:
+        # generate synthetic email for offline customer using phone
+        email = f"offline_{payload.customer_phone or uuid.uuid4().hex[:8]}@retrofarms.offline"
+    existing = await db.users.find_one({'email': email})
+    if existing:
+        cust_id = existing['user_id']
+        await db.users.update_one({'user_id': cust_id}, {'$set': {
+            'name': payload.customer_name or existing.get('name', ''),
+            'phone': payload.customer_phone or existing.get('phone', ''),
+        }})
+    else:
+        cust_id = f"user_{uuid.uuid4().hex[:12]}"
+        await db.users.insert_one({
+            'user_id': cust_id,
+            'email': email,
+            'name': payload.customer_name,
+            'phone': payload.customer_phone,
+            'role': 'customer',
+            'provider': 'offline',
+            'created_at': now_utc(),
+        })
+
+    order_id = uuid.uuid4().hex[:8]
+    order_doc = {
+        'order_id': order_id,
+        'user_id': cust_id,
+        'customer_email': email,
+        'customer_name': payload.customer_name,
+        'address': payload.address or {'full_name': payload.customer_name, 'phone': payload.customer_phone,
+                                        'line1': 'Offline order', 'city': 'Hyderabad', 'pincode': '', 'landmark': ''},
+        'items': items,
+        'subtotal': subtotal,
+        'delivery_charge': delivery,
+        'total': total,
+        'payment_method': payload.payment_method,
+        'payment_status': payload.payment_status,
+        'status': payload.status,
+        'assigned_staff_id': None,
+        'assigned_staff_name': None,
+        'source': 'offline',
+        'notes': payload.notes or '',
+        'created_at': now_utc(),
+        'created_by': current['user_id'],
+    }
+    await db.orders.insert_one(order_doc)
+    await decrement_stock(items)
+    doc = await db.orders.find_one({'order_id': order_id}, {'_id': 0})
+    return doc
+
+# ==================== PRODUCT CRUD ====================
+
+@api.post("/admin/products")
+async def create_product(payload: ProductCreatePayload, _u=Depends(require_admin)):
+    slug = payload.slug.strip().lower().replace(' ', '-')
+    if await db.products.find_one({'slug': slug}):
+        raise HTTPException(status_code=400, detail="Slug already exists")
+    doc = {
+        'slug': slug,
+        'name': payload.name,
+        'category': payload.category,
+        'image': payload.image,
+        'from_price': payload.from_price,
+        'description': payload.description,
+        'variants': [v.dict() for v in payload.variants],
+    }
+    await db.products.insert_one(doc)
+    doc.pop('_id', None)
+    return doc
+
+@api.put("/admin/products/{slug}")
+async def update_product(slug: str, payload: ProductUpdatePayload, _u=Depends(require_admin)):
+    p = await db.products.find_one({'slug': slug})
+    if not p:
+        raise HTTPException(status_code=404, detail="Not found")
+    update = {k: v for k, v in payload.dict().items() if v is not None}
+    if update:
+        await db.products.update_one({'slug': slug}, {'$set': update})
+    doc = await db.products.find_one({'slug': slug}, {'_id': 0})
+    return doc
+
+@api.delete("/admin/products/{slug}")
+async def delete_product(slug: str, _u=Depends(require_admin)):
+    r = await db.products.delete_one({'slug': slug})
+    if r.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"ok": True}
+
+@api.post("/admin/products/{slug}/variants")
+async def add_variant(slug: str, variant: VariantInput, _u=Depends(require_admin)):
+    p = await db.products.find_one({'slug': slug})
+    if not p:
+        raise HTTPException(status_code=404, detail="Not found")
+    if any(v['id'] == variant.id for v in p['variants']):
+        raise HTTPException(status_code=400, detail="Variant id already exists")
+    p['variants'].append(variant.dict())
+    await db.products.update_one({'slug': slug}, {'$set': {'variants': p['variants']}})
+    doc = await db.products.find_one({'slug': slug}, {'_id': 0})
+    return doc
+
+@api.patch("/admin/products/{slug}/variants/{variant_id}")
+async def update_variant(slug: str, variant_id: str, payload: VariantUpdatePayload, _u=Depends(require_admin)):
+    p = await db.products.find_one({'slug': slug})
+    if not p:
+        raise HTTPException(status_code=404, detail="Not found")
+    update = {k: v for k, v in payload.dict().items() if v is not None}
+    if not update:
+        return await db.products.find_one({'slug': slug}, {'_id': 0})
+    for v in p['variants']:
+        if v['id'] == variant_id:
+            v.update(update)
+            break
+    else:
+        raise HTTPException(status_code=404, detail="Variant not found")
+    await db.products.update_one({'slug': slug}, {'$set': {'variants': p['variants']}})
+    doc = await db.products.find_one({'slug': slug}, {'_id': 0})
+    return doc
+
+@api.delete("/admin/products/{slug}/variants/{variant_id}")
+async def delete_variant(slug: str, variant_id: str, _u=Depends(require_admin)):
+    p = await db.products.find_one({'slug': slug})
+    if not p:
+        raise HTTPException(status_code=404, detail="Not found")
+    new_variants = [v for v in p['variants'] if v['id'] != variant_id]
+    if len(new_variants) == len(p['variants']):
+        raise HTTPException(status_code=404, detail="Variant not found")
+    await db.products.update_one({'slug': slug}, {'$set': {'variants': new_variants}})
     return {"ok": True}
 
 # ==================== APP SETUP ====================

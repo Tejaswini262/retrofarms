@@ -285,6 +285,90 @@ backend:
         agent: "testing"
         comment: "POST /api/orders/verify with invalid signature correctly returns 400. Signature validation working (cannot test real payment completion in test environment)"
 
+  - task: "Offline orders creation"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "POST /api/admin/orders/offline working correctly. Admin and staff can create offline orders. Returns 401 without auth. Creates synthetic email (offline_{phone}@retrofarms.offline) when customer_email is empty. Correct totals calculated (subtotal=₹60, delivery=₹100, total=₹160 for 2x green-chilli). Orders appear in GET /api/admin/orders with source='offline'"
+
+  - task: "Product CRUD - Create"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "POST /api/admin/products creates new product correctly. Returns 400 for duplicate slug. Admin-only endpoint (staff gets 403). Created product accessible via GET /api/products/{slug}"
+
+  - task: "Product CRUD - Update"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "PUT /api/admin/products/{slug} updates product fields correctly. Changes persist in database. Admin-only endpoint (staff gets 403)"
+
+  - task: "Product CRUD - Delete"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "DELETE /api/admin/products/{slug} removes product. GET returns 404 after deletion. Admin-only endpoint (staff gets 403)"
+
+  - task: "Variant CRUD - Add"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "POST /api/admin/products/{slug}/variants adds new variant to product. Variant appears in product variants array. Admin-only endpoint"
+
+  - task: "Variant CRUD - Update"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "PATCH /api/admin/products/{slug}/variants/{variant_id} updates variant fields (price, stock, label). Changes persist correctly. Admin-only endpoint"
+
+  - task: "Variant CRUD - Delete"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "DELETE /api/admin/products/{slug}/variants/{variant_id} removes variant from product. Variant no longer appears in product variants array. Admin-only endpoint"
+
 frontend:
   - task: "Frontend UI"
     implemented: true
@@ -301,7 +385,7 @@ frontend:
 metadata:
   created_by: "testing_agent"
   version: "1.0"
-  test_sequence: 1
+  test_sequence: 2
   run_ui: false
 
 test_plan:
@@ -313,3 +397,5 @@ test_plan:
 agent_communication:
   - agent: "testing"
     message: "Completed comprehensive backend API testing. All 30 tests passed successfully. Backend is fully functional with no critical issues found. All endpoints working as expected including auth, products, orders, admin operations, Razorpay integration, and delivery charge logic."
+  - agent: "testing"
+    message: "Completed testing of NEW endpoints (Offline Orders + Product CRUD). All 20 new tests passed successfully. Total: 50 tests passed, 0 failed. New features working correctly: (1) Offline orders - admin/staff can create offline orders with synthetic email generation, correct totals, and source tracking. (2) Product CRUD - full CRUD operations for products and variants with proper admin-only access control. (3) Regression tests - all existing endpoints still working correctly."
