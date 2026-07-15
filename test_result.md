@@ -369,6 +369,42 @@ backend:
         agent: "testing"
         comment: "DELETE /api/admin/products/{slug}/variants/{variant_id} removes variant from product. Variant no longer appears in product variants array. Admin-only endpoint"
 
+  - task: "Offline order with total_override"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "POST /api/admin/orders/offline with total_override field working correctly. When total_override=250 is provided for items with subtotal=165, the response shows total=250 and delivery_charge=85 (calculated as total-subtotal). Without total_override, standard delivery logic applies (subtotal=165, delivery_charge=100, total=265)"
+
+  - task: "Customer orders endpoint"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "GET /api/admin/customers/{user_id}/orders returns correct response with {user: {...}, orders: [...]} structure. Orders are sorted by created_at desc. For nonexistent user_id, returns 200 with empty orders list. Requires admin/staff authentication"
+
+  - task: "total_spent calculation fix"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "GET /api/admin/customers now correctly calculates total_spent by summing all non-cancelled orders (previously only counted 'Paid' orders). Verified 8/8 customers with orders show total_spent > 0. List is correctly sorted by total_spent descending"
+
 frontend:
   - task: "Frontend UI"
     implemented: true
@@ -385,7 +421,7 @@ frontend:
 metadata:
   created_by: "testing_agent"
   version: "1.0"
-  test_sequence: 2
+  test_sequence: 3
   run_ui: false
 
 test_plan:
@@ -399,3 +435,5 @@ agent_communication:
     message: "Completed comprehensive backend API testing. All 30 tests passed successfully. Backend is fully functional with no critical issues found. All endpoints working as expected including auth, products, orders, admin operations, Razorpay integration, and delivery charge logic."
   - agent: "testing"
     message: "Completed testing of NEW endpoints (Offline Orders + Product CRUD). All 20 new tests passed successfully. Total: 50 tests passed, 0 failed. New features working correctly: (1) Offline orders - admin/staff can create offline orders with synthetic email generation, correct totals, and source tracking. (2) Product CRUD - full CRUD operations for products and variants with proper admin-only access control. (3) Regression tests - all existing endpoints still working correctly."
+  - agent: "testing"
+    message: "Completed testing of LATEST NEW FEATURES (total_override, customer orders endpoint, total_spent fix). All 10 tests passed successfully. Results: (1) Offline order with total_override - working correctly, when total_override=250 provided, response shows total=250 with adjusted delivery_charge=85. (2) Customer orders endpoint - GET /api/admin/customers/{user_id}/orders returns correct structure with user and orders, handles nonexistent users gracefully. (3) total_spent fix - now correctly sums all non-cancelled orders (not just Paid), list sorted by total_spent desc. (4) Regression tests - products list, admin stats, and basic offline orders still working correctly. No critical issues found."

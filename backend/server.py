@@ -193,6 +193,7 @@ class OfflineOrderPayload(BaseModel):
     payment_status: str = 'Paid'
     notes: Optional[str] = ''
     status: str = 'Placed'
+    total_override: Optional[int] = None  # if provided, use this as total (delivery=0)
 
 class VariantInput(BaseModel):
     id: str
@@ -626,7 +627,8 @@ async def admin_customers(_u=Depends(require_admin_or_staff)):
     out = []
     for u in users:
         u_orders = [o for o in orders if o['user_id'] == u['user_id']]
-        spent = sum(o['total'] for o in u_orders if o.get('payment_status') == 'Paid')
+        # Total spent = sum of all orders NOT cancelled
+        spent = sum(o['total'] for o in u_orders if o.get('status') != 'Cancelled')
         out.append({
             'user_id': u['user_id'],
             'name': u.get('name', ''),
@@ -635,7 +637,15 @@ async def admin_customers(_u=Depends(require_admin_or_staff)):
             'orders': len(u_orders),
             'total_spent': spent,
         })
+    # Sort by total_spent desc so top customers show first
+    out.sort(key=lambda x: x['total_spent'], reverse=True)
     return out
+
+@api.get("/admin/customers/{user_id}/orders")
+async def admin_customer_orders(user_id: str, _u=Depends(require_admin_or_staff)):
+    docs = await db.orders.find({'user_id': user_id}, {'_id': 0}).sort('created_at', -1).to_list(500)
+    user = await db.users.find_one({'user_id': user_id}, {'_id': 0, 'password_hash': 0})
+    return {'user': user, 'orders': docs}
 
 @api.get("/admin/staff")
 async def admin_staff_list(_u=Depends(require_admin_or_staff)):
@@ -693,6 +703,10 @@ async def create_offline_order(payload: OfflineOrderPayload, current=Depends(req
             'price': variant['price'], 'qty': it.qty,
         })
     subtotal, delivery, total = calc_totals(items)
+    if payload.total_override is not None and payload.total_override >= 0:
+        total = int(payload.total_override)
+        # store discount/adjustment as delta from subtotal
+        delivery = max(0, total - subtotal)
 
     # Find or create pseudo customer user
     email = (payload.customer_email or '').lower().strip()

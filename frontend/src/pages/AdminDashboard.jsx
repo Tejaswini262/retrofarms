@@ -4,7 +4,7 @@ import api from '../lib/api';
 import { useApp } from '../context/AppContext';
 import {
   TrendingUp, ShoppingBag, Truck, Package, Users, Trash2, X, Plus, Edit3, Save,
-  Upload, ImageIcon, Minus,
+  Upload, ImageIcon, Minus, MapPin, ExternalLink,
 } from 'lucide-react';
 
 const tabs = ['Inventory', 'Orders', 'Revenue / Customers', 'Staff'];
@@ -27,6 +27,22 @@ const statusColors = {
 const ORDER_STATUSES = ['Placed', 'Confirmed', 'Processing', 'Packed', 'Out for Delivery', 'Delivered', 'Cancelled'];
 const CATEGORIES = ['eggs', 'chicken', 'fruits', 'vegetables'];
 
+const VARIANT_PRESETS = [
+  '50 g', '100 g', '200 g', '250 g', '500 g', '750 g', '1 kg', '2 kg', '3 kg', '5 kg',
+  '100 ml', '250 ml', '500 ml', '1 L', '2 L',
+  '6 pcs', '12 pcs (1 dozen)', '30 pcs (1 tray)', '1 piece',
+];
+
+const buildMapsUrl = (addr) => {
+  if (!addr) return null;
+  if (addr.lat && addr.lng) {
+    return `https://www.google.com/maps?q=${addr.lat},${addr.lng}`;
+  }
+  const parts = [addr.line1, addr.line2, addr.city, addr.pincode, addr.landmark].filter(Boolean);
+  if (parts.length === 0) return null;
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(parts.join(', '))}`;
+};
+
 const fileToDataUrl = (file) => new Promise((resolve, reject) => {
   const reader = new FileReader();
   reader.onload = () => resolve(reader.result);
@@ -40,18 +56,21 @@ const OfflineOrderModal = ({ open, onClose, onCreated, products }) => {
   const [lines, setLines] = useState([]);
   const [payment, setPayment] = useState('cash');
   const [notes, setNotes] = useState('');
+  const [customTotal, setCustomTotal] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (!open) { setCustomer({ name: '', phone: '', email: '' }); setLines([]); setPayment('cash'); setNotes(''); setError(''); }
+    if (!open) { setCustomer({ name: '', phone: '', email: '' }); setLines([]); setPayment('cash'); setNotes(''); setCustomTotal(''); setError(''); }
   }, [open]);
 
   if (!open) return null;
 
   const subtotal = lines.reduce((s, l) => s + (l.price || 0) * (l.qty || 0), 0);
-  const delivery = subtotal > 0 && subtotal < 200 ? 100 : 0;
-  const total = subtotal + delivery;
+  const autoDelivery = subtotal > 0 && subtotal < 200 ? 100 : 0;
+  const hasCustomTotal = customTotal !== '' && !isNaN(parseInt(customTotal, 10));
+  const total = hasCustomTotal ? parseInt(customTotal, 10) : subtotal + autoDelivery;
+  const delivery = hasCustomTotal ? Math.max(0, total - subtotal) : autoDelivery;
 
   const addLine = () => setLines((L) => [...L, { slug: '', variant_id: '', qty: 1, price: 0 }]);
   const removeLine = (i) => setLines((L) => L.filter((_, idx) => idx !== i));
@@ -75,6 +94,7 @@ const OfflineOrderModal = ({ open, onClose, onCreated, products }) => {
         payment_status: 'Paid',
         notes,
         status: 'Placed',
+        total_override: hasCustomTotal ? parseInt(customTotal, 10) : null,
       });
       onCreated?.(r.data);
       onClose();
@@ -139,10 +159,27 @@ const OfflineOrderModal = ({ open, onClose, onCreated, products }) => {
             <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Notes (optional)" className="px-4 py-3 border border-[#E4D9C1] rounded-xl focus:outline-none focus:border-[#2B1D11]" />
           </div>
 
-          <div className="bg-[#FBF7EC] rounded-xl p-5">
-            <div className="flex justify-between text-[#4B3826]"><span>Subtotal</span><span>₹{subtotal}</span></div>
-            <div className="flex justify-between text-[#4B3826]"><span>Delivery</span><span>{delivery ? `₹${delivery}` : 'Free'}</span></div>
-            <div className="flex justify-between font-serif text-xl text-[#2B1D11] mt-2"><span>Total</span><span>₹{total}</span></div>
+          <div className="bg-[#FBF7EC] rounded-xl p-5 space-y-2">
+            <div className="flex justify-between text-[#4B3826]"><span>Subtotal (from items)</span><span>₹{subtotal}</span></div>
+            <div className="flex items-center justify-between gap-3">
+              <label className="text-[#4B3826] text-sm">Final total (override — leave blank for auto)</label>
+              <div className="flex items-center gap-2">
+                <span className="text-[#4B3826]">₹</span>
+                <input
+                  type="number"
+                  min="0"
+                  value={customTotal}
+                  onChange={(e) => setCustomTotal(e.target.value)}
+                  placeholder={String(subtotal + autoDelivery)}
+                  className="w-32 px-3 py-2 border border-[#E4D9C1] rounded-lg text-sm bg-white text-right"
+                />
+              </div>
+            </div>
+            {!hasCustomTotal && (
+              <div className="flex justify-between text-[#4B3826] text-sm"><span>Auto delivery {autoDelivery > 0 && '(subtotal < ₹200)'}</span><span>{autoDelivery ? `₹${autoDelivery}` : 'Free'}</span></div>
+            )}
+            <div className="h-px bg-[#E4D9C1] my-1" />
+            <div className="flex justify-between font-serif text-xl text-[#2B1D11]"><span>Total to record</span><span>₹{total}</span></div>
           </div>
 
           {error && <div className="text-sm text-red-600">{error}</div>}
@@ -286,11 +323,36 @@ const ProductEditorModal = ({ open, mode, initial, onClose, onSaved }) => {
               <div className="text-sm text-[#7A6A55] uppercase tracking-widest">Variants</div>
               <button type="button" onClick={addVariant} className="inline-flex items-center gap-1 text-sm text-[#4E6A3C]"><Plus size={15} /> Add variant</button>
             </div>
+            <div className="mb-3 flex flex-wrap gap-2">
+              <span className="text-xs text-[#7A6A55] mr-1 self-center">Quick labels:</span>
+              {VARIANT_PRESETS.map((preset) => (
+                <button
+                  key={preset}
+                  type="button"
+                  onClick={() => {
+                    // Fill the last empty variant's label, or add a new variant with this preset
+                    setForm((f) => {
+                      const idx = f.variants.findIndex((v) => !v.label);
+                      if (idx >= 0) {
+                        const copy = [...f.variants];
+                        copy[idx] = { ...copy[idx], label: preset, id: copy[idx].id || preset.toLowerCase().replace(/[^a-z0-9]+/g, '') };
+                        return { ...f, variants: copy };
+                      }
+                      const id = preset.toLowerCase().replace(/[^a-z0-9]+/g, '') || `v${Date.now()}`;
+                      return { ...f, variants: [...f.variants, { id, label: preset, price: 0, stock: 0 }] };
+                    });
+                  }}
+                  className="px-2.5 py-1 text-xs rounded-full border border-[#E4D9C1] text-[#2B1D11] hover:bg-[#EFE4CB]"
+                >
+                  {preset}
+                </button>
+              ))}
+            </div>
             <div className="space-y-2">
               {form.variants.map((v, i) => (
                 <div key={i} className="grid grid-cols-12 gap-2">
                   <input value={v.id} onChange={(e) => setVariant(i, { id: e.target.value })} placeholder="id" className="col-span-2 px-3 py-2 border border-[#E4D9C1] rounded-lg text-sm" />
-                  <input value={v.label} onChange={(e) => setVariant(i, { label: e.target.value })} placeholder="Label (e.g. 1 kg)" className="col-span-5 px-3 py-2 border border-[#E4D9C1] rounded-lg text-sm" />
+                  <input value={v.label} onChange={(e) => setVariant(i, { label: e.target.value })} placeholder="Label (e.g. 100 g, 500 ml, 1 kg)" className="col-span-5 px-3 py-2 border border-[#E4D9C1] rounded-lg text-sm" />
                   <input type="number" value={v.price} onChange={(e) => setVariant(i, { price: e.target.value })} placeholder="Price ₹" className="col-span-2 px-3 py-2 border border-[#E4D9C1] rounded-lg text-sm" />
                   <input type="number" value={v.stock} onChange={(e) => setVariant(i, { stock: e.target.value })} placeholder="Stock" className="col-span-2 px-3 py-2 border border-[#E4D9C1] rounded-lg text-sm" />
                   <button type="button" onClick={() => rmVariant(i)} className="col-span-1 text-red-500 hover:text-red-700 flex justify-center items-center"><Trash2 size={16} /></button>
@@ -327,6 +389,7 @@ const AdminDashboard = () => {
   const [editorOpen, setEditorOpen] = useState(false);
   const [editorMode, setEditorMode] = useState('create');
   const [editorProduct, setEditorProduct] = useState(null);
+  const [customerOrders, setCustomerOrders] = useState(null); // { user, orders }
   const [newStaff, setNewStaff] = useState({ name: '', email: '', phone: '', password: '', role: 'staff' });
   const [staffErr, setStaffErr] = useState('');
 
@@ -374,6 +437,10 @@ const AdminDashboard = () => {
     catch (e) { alert(e.response?.data?.detail || 'Failed'); }
   };
   const openInvoice = async (id) => { const r = await api.get(`/orders/${id}`); setInvoiceOrder(r.data); };
+  const openCustomerOrders = async (uid) => {
+    const r = await api.get(`/admin/customers/${uid}/orders`);
+    setCustomerOrders(r.data);
+  };
   const openEditProduct = (p) => { setEditorMode('edit'); setEditorProduct(p); setEditorOpen(true); };
   const openNewProduct = () => { setEditorMode('create'); setEditorProduct(null); setEditorOpen(true); };
   const deleteProduct = async (slug) => {
@@ -470,7 +537,7 @@ const AdminDashboard = () => {
               ))}
             </div>
             <div className="bg-white rounded-2xl border border-[#E4D9C1] overflow-x-auto">
-              <table className="w-full text-sm min-w-[1100px]">
+              <table className="w-full text-sm min-w-[1200px]">
                 <thead>
                   <tr className="bg-[#EFE4CB] text-[#2B1D11]">
                     <th className="text-left px-6 py-4">Order</th>
@@ -479,6 +546,7 @@ const AdminDashboard = () => {
                     <th className="text-left px-6 py-4">Items</th>
                     <th className="text-left px-6 py-4">Total</th>
                     <th className="text-left px-6 py-4">Payment</th>
+                    <th className="text-left px-6 py-4">Location</th>
                     <th className="text-left px-6 py-4">Assigned to</th>
                     <th className="text-left px-6 py-4">Status</th>
                     <th className="text-left px-6 py-4">Placed</th>
@@ -486,7 +554,9 @@ const AdminDashboard = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredOrders.map((o) => (
+                  {filteredOrders.map((o) => {
+                    const mapsUrl = buildMapsUrl(o.address);
+                    return (
                     <tr key={o.order_id} className="border-t border-[#EFE4CB] hover:bg-[#FBF7EC]">
                       <td className="px-6 py-4 text-[#2B1D11]">#{o.order_id}</td>
                       <td className="px-6 py-4 text-[#4B3826]">{o.customer_name || o.customer_email}<div className="text-xs text-[#7A6A55]">{o.customer_email}</div></td>
@@ -494,6 +564,15 @@ const AdminDashboard = () => {
                       <td className="px-6 py-4 text-[#4B3826]">{o.items?.length}</td>
                       <td className="px-6 py-4 font-serif text-[#2B1D11]">₹{o.total}</td>
                       <td className="px-6 py-4 text-[#4B3826] whitespace-nowrap">{o.payment_method?.toUpperCase()} · {o.payment_status}</td>
+                      <td className="px-6 py-4">
+                        {mapsUrl ? (
+                          <a href={mapsUrl} target="_blank" rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-full text-xs border border-[#4E6A3C] text-[#4E6A3C] hover:bg-[#4E6A3C] hover:text-white transition-colors whitespace-nowrap"
+                            title={[o.address?.line1, o.address?.line2, o.address?.city, o.address?.pincode].filter(Boolean).join(', ')}>
+                            <MapPin size={12} /> Open in Maps <ExternalLink size={11} />
+                          </a>
+                        ) : <span className="text-xs text-[#7A6A55]">—</span>}
+                      </td>
                       <td className="px-6 py-4">
                         <select value={o.assigned_staff_id || ''} onChange={(e) => updateOrder(o.order_id, { assigned_staff_id: e.target.value })}
                           className="bg-white border border-[#E4D9C1] rounded-lg px-2 py-1 text-xs text-[#2B1D11] focus:outline-none focus:border-[#2B1D11]">
@@ -512,9 +591,10 @@ const AdminDashboard = () => {
                         <button onClick={() => openInvoice(o.order_id)} className="px-4 py-1.5 border border-[#E4D9C1] rounded-full text-xs text-[#2B1D11] hover:border-[#2B1D11]">Invoice</button>
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                   {filteredOrders.length === 0 && (
-                    <tr><td colSpan={10} className="px-6 py-10 text-center text-[#7A6A55]">No orders found.</td></tr>
+                    <tr><td colSpan={11} className="px-6 py-10 text-center text-[#7A6A55]">No orders found.</td></tr>
                   )}
                 </tbody>
               </table>
@@ -524,6 +604,9 @@ const AdminDashboard = () => {
 
         {activeTab === 'Revenue / Customers' && (
           <div className="bg-white rounded-2xl border border-[#E4D9C1] overflow-x-auto">
+            <div className="px-6 pt-5 pb-3 text-xs text-[#7A6A55]">
+              Sorted by revenue. Click any customer row (or the orders count) to see their full order history.
+            </div>
             <table className="w-full text-sm min-w-[800px]">
               <thead>
                 <tr className="bg-[#EFE4CB] text-[#2B1D11]">
@@ -532,19 +615,31 @@ const AdminDashboard = () => {
                   <th className="text-left px-6 py-4">Email</th>
                   <th className="text-left px-6 py-4">Orders</th>
                   <th className="text-left px-6 py-4">Total Spent</th>
+                  <th className="text-left px-6 py-4"></th>
                 </tr>
               </thead>
               <tbody>
                 {customers.map((c) => (
-                  <tr key={c.user_id} className="border-t border-[#EFE4CB]">
-                    <td className="px-6 py-4 text-[#2B1D11]">{c.name || '—'}</td>
+                  <tr key={c.user_id} className="border-t border-[#EFE4CB] hover:bg-[#FBF7EC] cursor-pointer" onClick={() => openCustomerOrders(c.user_id)}>
+                    <td className="px-6 py-4 text-[#2B1D11] font-medium">{c.name || '—'}</td>
                     <td className="px-6 py-4 text-[#4B3826]">{c.phone}</td>
                     <td className="px-6 py-4 text-[#4B3826]">{c.email}</td>
-                    <td className="px-6 py-4 text-[#4B3826]">{c.orders}</td>
+                    <td className="px-6 py-4">
+                      <button type="button" onClick={(e) => { e.stopPropagation(); openCustomerOrders(c.user_id); }}
+                        className="text-[#C96C1B] hover:text-[#A85512] underline underline-offset-2">
+                        {c.orders} {c.orders === 1 ? 'order' : 'orders'}
+                      </button>
+                    </td>
                     <td className="px-6 py-4 font-serif text-[#2B1D11]">₹{c.total_spent?.toLocaleString?.() || 0}</td>
+                    <td className="px-6 py-4 text-right">
+                      <button type="button" onClick={(e) => { e.stopPropagation(); openCustomerOrders(c.user_id); }}
+                        className="px-4 py-1.5 border border-[#E4D9C1] rounded-full text-xs text-[#2B1D11] hover:border-[#2B1D11]">
+                        View orders
+                      </button>
+                    </td>
                   </tr>
                 ))}
-                {customers.length === 0 && <tr><td colSpan={5} className="px-6 py-10 text-center text-[#7A6A55]">No customers yet.</td></tr>}
+                {customers.length === 0 && <tr><td colSpan={6} className="px-6 py-10 text-center text-[#7A6A55]">No customers yet.</td></tr>}
               </tbody>
             </table>
           </div>
@@ -675,6 +770,71 @@ const AdminDashboard = () => {
           onClose={() => setEditorOpen(false)}
           onSaved={reload}
         />
+
+        {customerOrders && (
+          <div className="fixed inset-0 bg-black/50 z-50 flex items-start justify-center p-4 overflow-y-auto" onClick={() => setCustomerOrders(null)}>
+            <div className="bg-white rounded-2xl max-w-4xl w-full my-10" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-start justify-between px-8 py-5 border-b border-[#EFE4CB]">
+                <div>
+                  <div className="text-[#C96C1B] tracking-[0.3em] text-xs">CUSTOMER</div>
+                  <div className="font-serif text-2xl text-[#2B1D11]">{customerOrders.user?.name || '—'}</div>
+                  <div className="text-sm text-[#7A6A55]">
+                    {customerOrders.user?.email}
+                    {customerOrders.user?.phone ? ` · ${customerOrders.user.phone}` : ''}
+                  </div>
+                  <div className="text-xs text-[#7A6A55] mt-1">
+                    {customerOrders.orders.length} total order{customerOrders.orders.length === 1 ? '' : 's'} ·
+                    Lifetime spend: ₹{customerOrders.orders.filter((o) => o.status !== 'Cancelled').reduce((s, o) => s + (o.total || 0), 0).toLocaleString()}
+                  </div>
+                </div>
+                <button onClick={() => setCustomerOrders(null)} className="text-[#7A6A55] hover:text-[#2B1D11]"><X size={22} /></button>
+              </div>
+
+              <div className="p-4 md:p-6">
+                {customerOrders.orders.length === 0 ? (
+                  <div className="text-center py-10 text-[#7A6A55]">This customer hasn't placed any orders yet.</div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm min-w-[700px]">
+                      <thead>
+                        <tr className="text-left text-xs uppercase tracking-widest text-[#7A6A55] border-b border-[#EFE4CB]">
+                          <th className="py-2 pr-2">Order</th>
+                          <th className="py-2 pr-2">Date</th>
+                          <th className="py-2 pr-2">Items</th>
+                          <th className="py-2 pr-2">Payment</th>
+                          <th className="py-2 pr-2">Status</th>
+                          <th className="py-2 pr-2 text-right">Total</th>
+                          <th className="py-2 pr-2"></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {customerOrders.orders.map((o) => (
+                          <tr key={o.order_id} className="border-b border-[#EFE4CB]">
+                            <td className="py-3 pr-2 text-[#2B1D11]">#{o.order_id}</td>
+                            <td className="py-3 pr-2 text-[#4B3826] whitespace-nowrap">{o.created_at ? new Date(o.created_at).toLocaleString('en-IN') : ''}</td>
+                            <td className="py-3 pr-2 text-[#4B3826]">
+                              <div className="text-[#4B3826]">{o.items?.length} item{o.items?.length === 1 ? '' : 's'}</div>
+                              <div className="text-xs text-[#7A6A55]">{o.items?.map((i) => `${i.name} × ${i.qty}`).join(', ')}</div>
+                            </td>
+                            <td className="py-3 pr-2 text-[#4B3826] whitespace-nowrap">{o.payment_method?.toUpperCase()} · {o.payment_status}</td>
+                            <td className="py-3 pr-2"><span className={statusColors[o.status] || 'text-[#2B1D11]'}>{o.status}</span></td>
+                            <td className="py-3 pr-2 text-right font-serif text-[#2B1D11]">₹{o.total}</td>
+                            <td className="py-3 pr-2 text-right">
+                              <button onClick={() => { openInvoice(o.order_id); setCustomerOrders(null); }}
+                                className="px-3 py-1 border border-[#E4D9C1] rounded-full text-xs text-[#2B1D11] hover:border-[#2B1D11]">
+                                Invoice
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
