@@ -656,22 +656,28 @@ async def get_order(order_id: str, request: Request):
 
 @api.get("/admin/stats")
 async def admin_stats(_u=Depends(require_admin_or_staff)):
-    orders = await db.orders.find({}, {'_id': 0}).to_list(2000)
-    revenue = sum(o['total'] for o in orders if o.get('payment_status') == 'Paid')
-    pending = sum(1 for o in orders if o.get('status') not in ('Delivered', 'Cancelled'))
+    # Aggregate-based stats — no full-document loads
+    total_orders = await db.orders.count_documents({})
+    pending_orders = await db.orders.count_documents({'status': {'$nin': ['Delivered', 'Cancelled']}})
     products_count = await db.products.count_documents({})
     customers_count = await db.users.count_documents({'role': 'customer'})
+    revenue_pipe = [
+        {'$match': {'payment_status': 'Paid'}},
+        {'$group': {'_id': None, 'total': {'$sum': '$total'}}},
+    ]
+    rev_res = await db.orders.aggregate(revenue_pipe).to_list(1)
+    revenue = rev_res[0]['total'] if rev_res else 0
     return {
         'revenue': revenue,
-        'orders': len(orders),
-        'pending': pending,
+        'orders': total_orders,
+        'pending': pending_orders,
         'products': products_count,
         'customers': customers_count,
     }
 
 @api.get("/admin/orders")
-async def admin_orders(_u=Depends(require_admin_or_staff)):
-    docs = await db.orders.find({}, {'_id': 0}).sort('created_at', -1).to_list(2000)
+async def admin_orders(limit: int = 500, skip: int = 0, _u=Depends(require_admin_or_staff)):
+    docs = await db.orders.find({}, {'_id': 0}).sort('created_at', -1).skip(skip).limit(limit).to_list(limit)
     return docs
 
 @api.patch("/admin/orders/{order_id}")
@@ -700,30 +706,41 @@ async def admin_update_order(order_id: str, payload: UpdateOrderPayload, _u=Depe
     return doc
 
 @api.get("/admin/customers")
-async def admin_customers(_u=Depends(require_admin_or_staff)):
-    users = await db.users.find({'role': 'customer'}, {'_id': 0, 'password_hash': 0}).to_list(2000)
-    orders = await db.orders.find({}, {'_id': 0}).to_list(5000)
+async def admin_customers(limit: int = 500, _u=Depends(require_admin_or_staff)):
+    # Aggregate order stats per user (in-database)
+    pipe = [
+        {'$match': {'status': {'$ne': 'Cancelled'}}},
+        {'$group': {'_id': '$user_id',
+                    'total_spent': {'$sum': '$total'},
+                    'orders': {'$sum': 1}}},
+    ]
+    stats = {r['_id']: r async for r in db.orders.aggregate(pipe)}
+    # Also count total (including cancelled) for orders shown
+    total_pipe = [{'$group': {'_id': '$user_id', 'orders': {'$sum': 1}}}]
+    totals = {r['_id']: r['orders'] async for r in db.orders.aggregate(total_pipe)}
+
+    users = await db.users.find({'role': 'customer'},
+                                {'_id': 0, 'user_id': 1, 'name': 1, 'email': 1, 'phone': 1}
+                                ).limit(limit).to_list(limit)
     out = []
     for u in users:
-        u_orders = [o for o in orders if o['user_id'] == u['user_id']]
-        # Total spent = sum of all orders NOT cancelled
-        spent = sum(o['total'] for o in u_orders if o.get('status') != 'Cancelled')
+        s = stats.get(u['user_id'], {})
         out.append({
             'user_id': u['user_id'],
             'name': u.get('name', ''),
             'email': u['email'],
             'phone': u.get('phone', '') or '—',
-            'orders': len(u_orders),
-            'total_spent': spent,
+            'orders': totals.get(u['user_id'], 0),
+            'total_spent': s.get('total_spent', 0),
         })
-    # Sort by total_spent desc so top customers show first
     out.sort(key=lambda x: x['total_spent'], reverse=True)
     return out
 
 @api.get("/admin/customers/{user_id}/orders")
-async def admin_customer_orders(user_id: str, _u=Depends(require_admin_or_staff)):
-    docs = await db.orders.find({'user_id': user_id}, {'_id': 0}).sort('created_at', -1).to_list(500)
-    user = await db.users.find_one({'user_id': user_id}, {'_id': 0, 'password_hash': 0})
+async def admin_customer_orders(user_id: str, limit: int = 200, _u=Depends(require_admin_or_staff)):
+    docs = await db.orders.find({'user_id': user_id}, {'_id': 0}).sort('created_at', -1).limit(limit).to_list(limit)
+    user = await db.users.find_one({'user_id': user_id},
+                                    {'_id': 0, 'user_id': 1, 'name': 1, 'email': 1, 'phone': 1, 'provider': 1})
     return {'user': user, 'orders': docs}
 
 @api.get("/admin/staff")
@@ -953,32 +970,37 @@ async def delete_farmer(farmer_id: str, _u=Depends(require_admin)):
 # ==================== OFFLINE CUSTOMERS ====================
 
 @api.get("/admin/offline-customers")
-async def offline_customers(_u=Depends(require_admin_or_staff)):
-    """Returns all customers who've ordered before — for quick reuse in offline order form."""
-    users = await db.users.find({'role': 'customer'}, {'_id': 0, 'password_hash': 0}).to_list(2000)
-    orders = await db.orders.find({}, {'_id': 0, 'items': 0}).to_list(5000)
-    by_user = {}
-    for o in orders:
-        by_user.setdefault(o['user_id'], []).append(o)
+async def offline_customers(limit: int = 500, _u=Depends(require_admin_or_staff)):
+    """Returns customers with recent order metadata — for quick reuse in offline order form."""
+    pipe = [
+        {'$sort': {'created_at': -1}},
+        {'$group': {
+            '_id': '$user_id',
+            'orders': {'$sum': 1},
+            'last_ordered_at': {'$first': '$created_at'},
+            'last_address': {'$first': '$address'},
+        }},
+    ]
+    stats = {r['_id']: r async for r in db.orders.aggregate(pipe)}
+
+    users = await db.users.find({'role': 'customer'},
+                                {'_id': 0, 'user_id': 1, 'name': 1, 'email': 1,
+                                 'phone': 1, 'provider': 1}
+                                ).limit(limit).to_list(limit)
+    from datetime import datetime as dt_min
     out = []
     for u in users:
-        u_orders = by_user.get(u['user_id'], [])
-        last_order = None
-        if u_orders:
-            last_order = max(u_orders, key=lambda x: x.get('created_at') or '')
+        s = stats.get(u['user_id'], {})
         out.append({
             'user_id': u['user_id'],
             'name': u.get('name', ''),
             'email': u['email'],
             'phone': u.get('phone', ''),
             'provider': u.get('provider', ''),
-            'orders': len(u_orders),
-            'last_ordered_at': last_order.get('created_at') if last_order else None,
-            'last_address': (last_order or {}).get('address'),
+            'orders': s.get('orders', 0),
+            'last_ordered_at': s.get('last_ordered_at'),
+            'last_address': s.get('last_address'),
         })
-    # Sort by last_ordered_at desc (most recent first)
-    # Use datetime.min for None values to ensure proper sorting
-    from datetime import datetime as dt_min
     out.sort(key=lambda x: (x['last_ordered_at'] or dt_min(1970, 1, 1)), reverse=True)
     return out
 
