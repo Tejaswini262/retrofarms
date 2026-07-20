@@ -1,558 +1,581 @@
 #!/usr/bin/env python3
 """
-Backend API Test Suite for Retro Farms - Self-Service Credential Update
-Tests PATCH /api/auth/me endpoint and security checks
+Backend API Test Suite for Retro Farms - Refactored Endpoints Verification
+Tests the optimized admin endpoints that now use MongoDB aggregation pipelines
 """
 
 import requests
 import json
-import sys
+from datetime import datetime
 
+# Configuration
 BASE_URL = "https://farm-to-table-541.preview.emergentagent.com/api"
-
-# Test credentials from /app/memory/test_credentials.md
 ADMIN_EMAIL = "admin@retrofarms.in"
 ADMIN_PASSWORD = "admin123"
-STAFF_EMAIL = "staff@retrofarms.in"
-STAFF_PASSWORD = "staff123"
 
-class Colors:
-    GREEN = '\033[92m'
-    RED = '\033[91m'
-    YELLOW = '\033[93m'
-    BLUE = '\033[94m'
-    END = '\033[0m'
+# Test results tracking
+tests_passed = 0
+tests_failed = 0
+failures = []
 
-def log_test(name):
-    print(f"\n{Colors.BLUE}[TEST]{Colors.END} {name}")
-
-def log_pass(msg):
-    print(f"  {Colors.GREEN}✓{Colors.END} {msg}")
-
-def log_fail(msg):
-    print(f"  {Colors.RED}✗{Colors.END} {msg}")
-
-def log_info(msg):
-    print(f"  {Colors.YELLOW}ℹ{Colors.END} {msg}")
+def log_test(name, passed, details=""):
+    global tests_passed, tests_failed, failures
+    if passed:
+        tests_passed += 1
+        print(f"✅ {name}")
+    else:
+        tests_failed += 1
+        failures.append(f"{name}: {details}")
+        print(f"❌ {name}")
+        if details:
+            print(f"   Details: {details}")
 
 def admin_login():
     """Login as admin and return session cookie"""
-    r = requests.post(f"{BASE_URL}/auth/admin-login", json={
+    print("\n🔐 Logging in as admin...")
+    resp = requests.post(f"{BASE_URL}/auth/admin-login", json={
         "email": ADMIN_EMAIL,
         "password": ADMIN_PASSWORD
     })
-    if r.status_code != 200:
-        log_fail(f"Admin login failed: {r.status_code} {r.text}")
+    if resp.status_code != 200:
+        print(f"❌ Admin login failed: {resp.status_code} - {resp.text}")
         return None
-    return r.cookies.get('session_token')
-
-def staff_login():
-    """Login as staff and return session cookie"""
-    r = requests.post(f"{BASE_URL}/auth/admin-login", json={
-        "email": STAFF_EMAIL,
-        "password": STAFF_PASSWORD
-    })
-    if r.status_code != 200:
-        log_fail(f"Staff login failed: {r.status_code} {r.text}")
+    
+    session_token = resp.cookies.get('session_token')
+    if not session_token:
+        print("❌ No session_token cookie received")
         return None
-    return r.cookies.get('session_token')
+    
+    print(f"✅ Admin login successful")
+    return {'session_token': session_token}
 
-def test_unauthenticated_returns_401():
-    """Test 1: Unauthenticated PATCH /api/auth/me returns 401"""
-    log_test("Test 1: Unauthenticated PATCH /api/auth/me returns 401")
+def test_admin_stats(cookies):
+    """Test 1: GET /api/admin/stats - must return correct structure with aggregated data"""
+    print("\n📊 Test 1: Admin Stats Endpoint")
+    resp = requests.get(f"{BASE_URL}/admin/stats", cookies=cookies)
     
-    r = requests.patch(f"{BASE_URL}/auth/me", json={"name": "Test"})
+    if resp.status_code != 200:
+        log_test("Admin stats - status code", False, f"Expected 200, got {resp.status_code}")
+        return None
     
-    if r.status_code == 401:
-        log_pass("Returns 401 without authentication")
-        return True
+    log_test("Admin stats - status code", True)
+    
+    data = resp.json()
+    required_keys = ['revenue', 'orders', 'pending', 'products', 'customers']
+    
+    # Check all required keys exist
+    missing_keys = [k for k in required_keys if k not in data]
+    if missing_keys:
+        log_test("Admin stats - required keys", False, f"Missing keys: {missing_keys}")
+        return None
+    
+    log_test("Admin stats - required keys", True)
+    
+    # Check all values are numeric
+    non_numeric = [k for k in required_keys if not isinstance(data[k], (int, float))]
+    if non_numeric:
+        log_test("Admin stats - numeric values", False, f"Non-numeric values: {non_numeric}")
+        return None
+    
+    log_test("Admin stats - numeric values", True)
+    
+    # Check products >= 11 (seeded products)
+    if data['products'] < 11:
+        log_test("Admin stats - products count", False, f"Expected >= 11, got {data['products']}")
     else:
-        log_fail(f"Expected 401, got {r.status_code}")
-        return False
+        log_test("Admin stats - products count", True)
+    
+    # Check customers > 0
+    if data['customers'] <= 0:
+        log_test("Admin stats - customers count", False, f"Expected > 0, got {data['customers']}")
+    else:
+        log_test("Admin stats - customers count", True)
+    
+    print(f"   Stats: revenue={data['revenue']}, orders={data['orders']}, pending={data['pending']}, products={data['products']}, customers={data['customers']}")
+    return data
 
-def test_update_profile_as_admin():
-    """Test 2: Update profile (name, phone) as admin"""
-    log_test("Test 2: Update profile (name, phone) as admin")
+def test_admin_orders_pagination(cookies):
+    """Test 2: GET /api/admin/orders - test pagination with limit and skip"""
+    print("\n📦 Test 2: Admin Orders Pagination")
     
-    token = admin_login()
-    if not token:
-        return False
+    # Test 2a: Default (up to 500 orders)
+    resp = requests.get(f"{BASE_URL}/admin/orders", cookies=cookies)
+    if resp.status_code != 200:
+        log_test("Admin orders - default request", False, f"Status {resp.status_code}")
+        return None
     
-    cookies = {'session_token': token}
+    log_test("Admin orders - default request", True)
     
-    # Update name and phone
-    r = requests.patch(f"{BASE_URL}/auth/me", 
-                      json={"name": "New Admin Name", "phone": "9998887777"},
-                      cookies=cookies)
+    all_orders = resp.json()
+    if not isinstance(all_orders, list):
+        log_test("Admin orders - returns array", False, f"Expected array, got {type(all_orders)}")
+        return None
     
-    if r.status_code != 200:
-        log_fail(f"Update failed: {r.status_code} {r.text}")
-        return False
+    log_test("Admin orders - returns array", True)
+    print(f"   Total orders: {len(all_orders)}")
     
-    data = r.json()
+    # Check sorting by created_at desc
+    if len(all_orders) >= 2:
+        dates = [o.get('created_at') for o in all_orders[:10]]
+        is_sorted = all(dates[i] >= dates[i+1] for i in range(len(dates)-1) if dates[i] and dates[i+1])
+        log_test("Admin orders - sorted by created_at desc", is_sorted, 
+                 "Orders not sorted correctly" if not is_sorted else "")
     
-    # Check response has user_public fields
-    if 'user_id' not in data or 'email' not in data or 'name' not in data:
-        log_fail("Response missing user_public fields")
-        return False
-    
-    # Check password_hash is NOT in response
-    if 'password_hash' in data:
-        log_fail("SECURITY ISSUE: password_hash leaked in response")
-        return False
-    
-    # Check updated values
-    if data['name'] != "New Admin Name":
-        log_fail(f"Name not updated: {data['name']}")
-        return False
-    
-    if data['phone'] != "9998887777":
-        log_fail(f"Phone not updated: {data['phone']}")
-        return False
-    
-    log_pass("Profile updated successfully")
-    log_pass("Response contains user_public fields only (no password_hash)")
-    
-    # Verify with GET /api/auth/me
-    r2 = requests.get(f"{BASE_URL}/auth/me", cookies=cookies)
-    if r2.status_code == 200:
-        data2 = r2.json()
-        if data2['name'] == "New Admin Name" and data2['phone'] == "9998887777":
-            log_pass("GET /api/auth/me confirms the update")
+    # Check required fields in first order
+    if all_orders:
+        first_order = all_orders[0]
+        required_fields = ['order_id', 'customer_email', 'items', 'total', 'status', 
+                          'payment_status', 'address', 'assigned_staff_id']
+        missing = [f for f in required_fields if f not in first_order]
+        if missing:
+            log_test("Admin orders - required fields", False, f"Missing: {missing}")
         else:
-            log_fail("GET /api/auth/me does not reflect updates")
-            return False
+            log_test("Admin orders - required fields", True)
     
-    return True
-
-def test_change_admin_email():
-    """Test 3: Change admin email"""
-    log_test("Test 3: Change admin email")
+    # Test 2b: limit=5
+    resp = requests.get(f"{BASE_URL}/admin/orders?limit=5", cookies=cookies)
+    if resp.status_code != 200:
+        log_test("Admin orders - limit=5", False, f"Status {resp.status_code}")
+        return None
     
-    token = admin_login()
-    if not token:
-        return False
-    
-    cookies = {'session_token': token}
-    
-    # Change email to admin2@retrofarms.in
-    r = requests.patch(f"{BASE_URL}/auth/me", 
-                      json={"email": "admin2@retrofarms.in"},
-                      cookies=cookies)
-    
-    if r.status_code != 200:
-        log_fail(f"Email change failed: {r.status_code} {r.text}")
-        return False
-    
-    data = r.json()
-    if data['email'] != "admin2@retrofarms.in":
-        log_fail(f"Email not updated: {data['email']}")
-        return False
-    
-    log_pass("Email changed to admin2@retrofarms.in")
-    
-    # Verify login works with new email
-    r2 = requests.post(f"{BASE_URL}/auth/admin-login", json={
-        "email": "admin2@retrofarms.in",
-        "password": ADMIN_PASSWORD
-    })
-    
-    if r2.status_code == 200:
-        log_pass("Login works with new email (admin2@retrofarms.in)")
+    limited_orders = resp.json()
+    if len(limited_orders) > 5:
+        log_test("Admin orders - limit=5 respected", False, f"Expected max 5, got {len(limited_orders)}")
     else:
-        log_fail(f"Login with new email failed: {r2.status_code}")
-        return False
+        log_test("Admin orders - limit=5 respected", True)
+        print(f"   Limited orders: {len(limited_orders)}")
     
-    # Change back to original email
-    new_token = r2.cookies.get('session_token')
-    r3 = requests.patch(f"{BASE_URL}/auth/me", 
-                       json={"email": ADMIN_EMAIL},
-                       cookies={'session_token': new_token})
+    # Test 2c: limit=5&skip=5 (pagination)
+    resp = requests.get(f"{BASE_URL}/admin/orders?limit=5&skip=5", cookies=cookies)
+    if resp.status_code != 200:
+        log_test("Admin orders - pagination (skip)", False, f"Status {resp.status_code}")
+        return None
     
-    if r3.status_code == 200:
-        log_pass(f"Email restored to {ADMIN_EMAIL}")
-    else:
-        log_fail(f"Failed to restore email: {r3.status_code}")
-        return False
+    paginated_orders = resp.json()
+    log_test("Admin orders - pagination (skip)", True)
+    print(f"   Paginated orders (skip=5): {len(paginated_orders)}")
     
-    return True
-
-def test_email_conflict():
-    """Test 4: Email conflict - cannot use existing email"""
-    log_test("Test 4: Email conflict - cannot use existing email")
-    
-    token = admin_login()
-    if not token:
-        return False
-    
-    cookies = {'session_token': token}
-    
-    # Try to change admin email to staff email (should fail)
-    r = requests.patch(f"{BASE_URL}/auth/me", 
-                      json={"email": STAFF_EMAIL},
-                      cookies=cookies)
-    
-    if r.status_code == 400:
-        data = r.json()
-        if "already in use" in data.get('detail', '').lower():
-            log_pass("Returns 400 'Email already in use' for conflict")
-            return True
+    # Verify pagination returns different orders
+    if len(all_orders) > 5 and limited_orders and paginated_orders:
+        first_page_ids = [o['order_id'] for o in limited_orders]
+        second_page_ids = [o['order_id'] for o in paginated_orders]
+        overlap = set(first_page_ids) & set(second_page_ids)
+        if overlap:
+            log_test("Admin orders - pagination returns different orders", False, 
+                     f"Found overlapping order_ids: {overlap}")
         else:
-            log_fail(f"Returns 400 but wrong message: {data.get('detail')}")
-            return False
-    else:
-        log_fail(f"Expected 400, got {r.status_code}")
-        return False
+            log_test("Admin orders - pagination returns different orders", True)
+    
+    return all_orders
 
-def test_change_password_with_verification():
-    """Test 5: Change password with current password verification (CRITICAL)"""
-    log_test("Test 5: Change password with current password verification (CRITICAL)")
+def test_admin_customers(cookies):
+    """Test 3: GET /api/admin/customers - verify aggregated total_spent calculation"""
+    print("\n👥 Test 3: Admin Customers with Aggregated Stats")
     
-    token = admin_login()
-    if not token:
-        return False
+    resp = requests.get(f"{BASE_URL}/admin/customers", cookies=cookies)
+    if resp.status_code != 200:
+        log_test("Admin customers - status code", False, f"Status {resp.status_code}")
+        return None
     
-    cookies = {'session_token': token}
+    log_test("Admin customers - status code", True)
     
-    # Change password from admin123 to newSecure123
-    r = requests.patch(f"{BASE_URL}/auth/me", 
-                      json={"current_password": ADMIN_PASSWORD, "new_password": "newSecure123"},
-                      cookies=cookies)
+    customers = resp.json()
+    if not isinstance(customers, list):
+        log_test("Admin customers - returns array", False, f"Expected array, got {type(customers)}")
+        return None
     
-    if r.status_code != 200:
-        log_fail(f"Password change failed: {r.status_code} {r.text}")
-        return False
+    log_test("Admin customers - returns array", True)
+    print(f"   Total customers: {len(customers)}")
     
-    log_pass("Password change request succeeded (200)")
+    # Check required fields
+    if customers:
+        first_customer = customers[0]
+        required_fields = ['user_id', 'name', 'email', 'phone', 'orders', 'total_spent']
+        missing = [f for f in required_fields if f not in first_customer]
+        if missing:
+            log_test("Admin customers - required fields", False, f"Missing: {missing}")
+        else:
+            log_test("Admin customers - required fields", True)
     
-    # Verify old password now fails
-    r2 = requests.post(f"{BASE_URL}/auth/admin-login", json={
-        "email": ADMIN_EMAIL,
-        "password": ADMIN_PASSWORD
-    })
+    # Check sorted by total_spent desc
+    if len(customers) >= 2:
+        spent_values = [c['total_spent'] for c in customers]
+        is_sorted = all(spent_values[i] >= spent_values[i+1] for i in range(len(spent_values)-1))
+        log_test("Admin customers - sorted by total_spent desc", is_sorted,
+                 "Customers not sorted correctly" if not is_sorted else "")
+        print(f"   Top 3 spenders: {spent_values[:3]}")
     
-    if r2.status_code == 401:
-        log_pass("Old password (admin123) now fails with 401")
-    else:
-        log_fail(f"Old password still works! Status: {r2.status_code}")
-        return False
+    # Verify total_spent calculation for first customer
+    if customers:
+        test_customer = customers[0]
+        user_id = test_customer['user_id']
+        
+        # Get customer's orders
+        resp = requests.get(f"{BASE_URL}/admin/customers/{user_id}/orders", cookies=cookies)
+        if resp.status_code == 200:
+            data = resp.json()
+            orders = data.get('orders', [])
+            
+            # Calculate total_spent manually (sum of non-cancelled orders)
+            manual_total = sum(o['total'] for o in orders if o.get('status') != 'Cancelled')
+            
+            if abs(test_customer['total_spent'] - manual_total) < 0.01:
+                log_test("Admin customers - total_spent calculation", True)
+                print(f"   Verified total_spent for {test_customer['email']}: {test_customer['total_spent']}")
+            else:
+                log_test("Admin customers - total_spent calculation", False,
+                         f"Expected {manual_total}, got {test_customer['total_spent']}")
+        else:
+            log_test("Admin customers - total_spent verification", False, 
+                     "Could not fetch customer orders for verification")
     
-    # Verify new password works
-    r3 = requests.post(f"{BASE_URL}/auth/admin-login", json={
-        "email": ADMIN_EMAIL,
-        "password": "newSecure123"
-    })
-    
-    if r3.status_code == 200:
-        log_pass("New password (newSecure123) works correctly")
-    else:
-        log_fail(f"New password doesn't work: {r3.status_code}")
-        return False
-    
-    # Restore original password
-    new_token = r3.cookies.get('session_token')
-    r4 = requests.patch(f"{BASE_URL}/auth/me", 
-                       json={"current_password": "newSecure123", "new_password": ADMIN_PASSWORD},
-                       cookies={'session_token': new_token})
-    
-    if r4.status_code == 200:
-        log_pass(f"Password restored to {ADMIN_PASSWORD}")
-    else:
-        log_fail(f"Failed to restore password: {r4.status_code}")
-        return False
-    
-    return True
+    return customers
 
-def test_password_change_fails_without_current():
-    """Test 6: Password change fails without current password"""
-    log_test("Test 6: Password change fails without current password")
+def test_customer_orders_endpoint(cookies):
+    """Test 4: GET /api/admin/customers/{user_id}/orders - verify structure and limit"""
+    print("\n📋 Test 4: Customer Orders Endpoint")
     
-    token = admin_login()
-    if not token:
-        return False
+    # First get a customer
+    resp = requests.get(f"{BASE_URL}/admin/customers", cookies=cookies)
+    if resp.status_code != 200:
+        log_test("Customer orders - get test customer", False, "Could not fetch customers")
+        return
     
-    cookies = {'session_token': token}
+    customers = resp.json()
+    if not customers:
+        log_test("Customer orders - get test customer", False, "No customers found")
+        return
     
-    # Try to change password without current_password
-    r = requests.patch(f"{BASE_URL}/auth/me", 
-                      json={"new_password": "anotherOne"},
-                      cookies=cookies)
+    test_customer = customers[0]
+    user_id = test_customer['user_id']
     
-    if r.status_code == 400:
-        data = r.json()
-        if "current password required" in data.get('detail', '').lower():
-            log_pass("Returns 400 'Current password required'")
-            return True
-        else:
-            log_fail(f"Returns 400 but wrong message: {data.get('detail')}")
-            return False
+    # Test default request
+    resp = requests.get(f"{BASE_URL}/admin/customers/{user_id}/orders", cookies=cookies)
+    if resp.status_code != 200:
+        log_test("Customer orders - status code", False, f"Status {resp.status_code}")
+        return
+    
+    log_test("Customer orders - status code", True)
+    
+    data = resp.json()
+    
+    # Check structure
+    if 'user' not in data or 'orders' not in data:
+        log_test("Customer orders - response structure", False, 
+                 f"Expected {{user, orders}}, got keys: {list(data.keys())}")
+        return
+    
+    log_test("Customer orders - response structure", True)
+    
+    # Check user object
+    if data['user'] and 'user_id' in data['user']:
+        log_test("Customer orders - user object", True)
     else:
-        log_fail(f"Expected 400, got {r.status_code}")
-        return False
+        log_test("Customer orders - user object", False, "Invalid user object")
+    
+    # Check orders array
+    if isinstance(data['orders'], list):
+        log_test("Customer orders - orders array", True)
+        print(f"   Customer {data['user']['email']} has {len(data['orders'])} orders")
+    else:
+        log_test("Customer orders - orders array", False, "Orders is not an array")
+    
+    # Test limit parameter
+    if len(data['orders']) > 2:
+        resp = requests.get(f"{BASE_URL}/admin/customers/{user_id}/orders?limit=2", cookies=cookies)
+        if resp.status_code == 200:
+            limited_data = resp.json()
+            if len(limited_data['orders']) <= 2:
+                log_test("Customer orders - limit parameter", True)
+            else:
+                log_test("Customer orders - limit parameter", False, 
+                         f"Expected max 2, got {len(limited_data['orders'])}")
+        else:
+            log_test("Customer orders - limit parameter", False, f"Status {resp.status_code}")
 
-def test_password_change_fails_with_wrong_current():
-    """Test 7: Password change fails with wrong current password"""
-    log_test("Test 7: Password change fails with wrong current password")
+def test_offline_customers(cookies):
+    """Test 5: GET /api/admin/offline-customers - verify aggregated metadata"""
+    print("\n🏪 Test 5: Offline Customers Endpoint")
     
-    token = admin_login()
-    if not token:
-        return False
+    resp = requests.get(f"{BASE_URL}/admin/offline-customers", cookies=cookies)
+    if resp.status_code != 200:
+        log_test("Offline customers - status code", False, f"Status {resp.status_code}")
+        return None
     
-    cookies = {'session_token': token}
+    log_test("Offline customers - status code", True)
     
-    # Try to change password with wrong current_password
-    r = requests.patch(f"{BASE_URL}/auth/me", 
-                      json={"current_password": "WRONG", "new_password": "anotherOne"},
-                      cookies=cookies)
+    customers = resp.json()
+    if not isinstance(customers, list):
+        log_test("Offline customers - returns array", False, f"Expected array, got {type(customers)}")
+        return None
     
-    if r.status_code == 401:
-        data = r.json()
-        if "current password is incorrect" in data.get('detail', '').lower():
-            log_pass("Returns 401 'Current password is incorrect'")
-            return True
+    log_test("Offline customers - returns array", True)
+    print(f"   Total offline customers: {len(customers)}")
+    
+    # Check required fields
+    if customers:
+        first_customer = customers[0]
+        required_fields = ['user_id', 'name', 'email', 'phone', 'orders', 
+                          'last_ordered_at', 'last_address']
+        missing = [f for f in required_fields if f not in first_customer]
+        if missing:
+            log_test("Offline customers - required fields", False, f"Missing: {missing}")
         else:
-            log_fail(f"Returns 401 but wrong message: {data.get('detail')}")
-            return False
-    else:
-        log_fail(f"Expected 401, got {r.status_code}")
-        return False
+            log_test("Offline customers - required fields", True)
+    
+    # Check sorted by last_ordered_at desc
+    if len(customers) >= 2:
+        # Filter customers with orders
+        with_orders = [c for c in customers if c.get('last_ordered_at')]
+        if len(with_orders) >= 2:
+            dates = [c['last_ordered_at'] for c in with_orders[:10]]
+            is_sorted = all(dates[i] >= dates[i+1] for i in range(len(dates)-1))
+            log_test("Offline customers - sorted by last_ordered_at desc", is_sorted,
+                     "Customers not sorted correctly" if not is_sorted else "")
+    
+    return customers
 
-def test_password_too_short():
-    """Test 8: Password too short validation"""
-    log_test("Test 8: Password too short validation")
+def test_regression_endpoints(cookies):
+    """Test 6: Regression tests - verify other endpoints still work"""
+    print("\n🔄 Test 6: Regression Tests")
     
-    token = admin_login()
-    if not token:
-        return False
+    # Test 6a: POST /api/admin/orders/offline
+    print("   Testing offline order creation...")
+    offline_order_payload = {
+        "customer_name": "Test Regression Customer",
+        "customer_phone": "9876543210",
+        "customer_email": "",
+        "items": [
+            {"slug": "green-chilli", "variant_id": "250g", "qty": 1}
+        ],
+        "address": {
+            "full_name": "Test Regression Customer",
+            "phone": "9876543210",
+            "line1": "Test Address Line 1",
+            "city": "Hyderabad",
+            "pincode": "500001",
+            "landmark": "Near Test Landmark"
+        },
+        "payment_status": "Pending"  # Set to Pending to not affect revenue in data integrity test
+    }
     
-    cookies = {'session_token': token}
-    
-    # Try to set password shorter than 6 characters
-    r = requests.patch(f"{BASE_URL}/auth/me", 
-                      json={"current_password": ADMIN_PASSWORD, "new_password": "abc"},
-                      cookies=cookies)
-    
-    if r.status_code == 400:
-        data = r.json()
-        if "at least 6 characters" in data.get('detail', '').lower():
-            log_pass("Returns 400 'Password must be at least 6 characters'")
-            return True
-        else:
-            log_fail(f"Returns 400 but wrong message: {data.get('detail')}")
-            return False
+    resp = requests.post(f"{BASE_URL}/admin/orders/offline", 
+                        json=offline_order_payload, cookies=cookies)
+    if resp.status_code == 200:
+        log_test("Regression - offline order creation", True)
+        offline_order = resp.json()
+        offline_order_id = offline_order.get('order_id')
+        print(f"   Created offline order: {offline_order_id}")
     else:
-        log_fail(f"Expected 400, got {r.status_code}")
-        return False
+        log_test("Regression - offline order creation", False, 
+                 f"Status {resp.status_code}: {resp.text}")
+        offline_order_id = None
+    
+    # Test 6b: PATCH /api/admin/orders/{order_id}
+    if offline_order_id:
+        print("   Testing order update...")
+        resp = requests.patch(f"{BASE_URL}/admin/orders/{offline_order_id}",
+                            json={"status": "Confirmed"}, cookies=cookies)
+        if resp.status_code == 200:
+            updated_order = resp.json()
+            if updated_order.get('status') == 'Confirmed':
+                log_test("Regression - order update", True)
+            else:
+                log_test("Regression - order update", False, "Status not updated")
+        else:
+            log_test("Regression - order update", False, f"Status {resp.status_code}")
+    
+    # Test 6c: GET /api/products
+    print("   Testing products list...")
+    resp = requests.get(f"{BASE_URL}/products")
+    if resp.status_code == 200:
+        products = resp.json()
+        if isinstance(products, list) and len(products) >= 11:
+            log_test("Regression - products list", True)
+        else:
+            log_test("Regression - products list", False, 
+                     f"Expected array with >= 11 products, got {len(products) if isinstance(products, list) else 'not array'}")
+    else:
+        log_test("Regression - products list", False, f"Status {resp.status_code}")
+    
+    # Test 6d: PATCH /api/auth/me (profile update)
+    print("   Testing profile update...")
+    resp = requests.patch(f"{BASE_URL}/auth/me",
+                         json={"phone": "9999999999"}, cookies=cookies)
+    if resp.status_code == 200:
+        log_test("Regression - profile update", True)
+    else:
+        log_test("Regression - profile update", False, f"Status {resp.status_code}")
+    
+    return offline_order_id
 
-def test_staff_profile_update():
-    """Test 9: Same works for staff"""
-    log_test("Test 9: Staff can update their own profile")
+def test_data_integrity(cookies, initial_stats):
+    """Test 7: Data integrity - create order and verify stats/customer updates"""
+    print("\n🔍 Test 7: Data Integrity Verification")
     
-    token = staff_login()
-    if not token:
-        return False
+    # Create an offline order as admin (since there's no direct customer registration)
+    print("   Creating offline COD order as admin...")
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    customer_email = f"testcustomer{timestamp}@example.com"
     
-    cookies = {'session_token': token}
+    offline_order_payload = {
+        "customer_name": "Test Customer Data Integrity",
+        "customer_phone": "9999888877",
+        "customer_email": customer_email,
+        "items": [
+            {"slug": "country-eggs", "variant_id": "dozen", "qty": 2}
+        ],
+        "address": {
+            "full_name": "Test Customer Data Integrity",
+            "phone": "9999888877",
+            "line1": "Test Address Line 1",
+            "city": "Hyderabad",
+            "pincode": "500001",
+            "landmark": "Near Test Landmark"
+        },
+        "payment_method": "cod",
+        "payment_status": "Pending",
+        "status": "Placed"
+    }
     
-    # Update staff name
-    r = requests.patch(f"{BASE_URL}/auth/me", 
-                      json={"name": "Delivery Staff Updated"},
-                      cookies=cookies)
+    resp = requests.post(f"{BASE_URL}/admin/orders/offline", 
+                        json=offline_order_payload, cookies=cookies)
     
-    if r.status_code != 200:
-        log_fail(f"Staff profile update failed: {r.status_code} {r.text}")
-        return False
+    if resp.status_code != 200:
+        log_test("Data integrity - COD order creation", False, 
+                 f"Status {resp.status_code}: {resp.text}")
+        return
     
-    data = r.json()
-    if data['name'] != "Delivery Staff Updated":
-        log_fail(f"Name not updated: {data['name']}")
-        return False
+    log_test("Data integrity - COD order creation", True)
+    order_data = resp.json()
+    order_id = order_data.get('order_id')
+    order_total = order_data.get('total')
+    customer_user_id = order_data.get('user_id')
+    print(f"   Created order {order_id} with total ₹{order_total}")
     
-    log_pass("Staff profile updated successfully")
-    
-    # Test staff password change
-    r2 = requests.patch(f"{BASE_URL}/auth/me", 
-                       json={"current_password": STAFF_PASSWORD, "new_password": "newStaff123"},
-                       cookies=cookies)
-    
-    if r2.status_code != 200:
-        log_fail(f"Staff password change failed: {r2.status_code}")
-        return False
-    
-    log_pass("Staff password change succeeded")
-    
-    # Verify new password works
-    r3 = requests.post(f"{BASE_URL}/auth/admin-login", json={
-        "email": STAFF_EMAIL,
-        "password": "newStaff123"
-    })
-    
-    if r3.status_code == 200:
-        log_pass("New staff password works")
+    # Test 7a: Verify order appears in admin orders
+    print("   Verifying order appears in admin orders...")
+    resp = requests.get(f"{BASE_URL}/admin/orders", cookies=cookies)
+    if resp.status_code == 200:
+        orders = resp.json()
+        order_found = any(o['order_id'] == order_id for o in orders)
+        log_test("Data integrity - order in admin orders", order_found,
+                 "Order not found in admin orders" if not order_found else "")
     else:
-        log_fail(f"New staff password doesn't work: {r3.status_code}")
-        return False
+        log_test("Data integrity - order in admin orders", False, f"Status {resp.status_code}")
     
-    # Restore original password
-    new_token = r3.cookies.get('session_token')
-    r4 = requests.patch(f"{BASE_URL}/auth/me", 
-                       json={"current_password": "newStaff123", "new_password": STAFF_PASSWORD},
-                       cookies={'session_token': new_token})
-    
-    if r4.status_code == 200:
-        log_pass("Staff password restored")
-    else:
-        log_fail(f"Failed to restore staff password: {r4.status_code}")
-        return False
-    
-    return True
-
-def test_no_password_hash_leak():
-    """Test 10: Security check - no password_hash leak"""
-    log_test("Test 10: Security check - no password_hash leak in any endpoint")
-    
-    token = admin_login()
-    if not token:
-        return False
-    
-    cookies = {'session_token': token}
-    all_pass = True
-    
-    # Check GET /api/auth/me
-    r1 = requests.get(f"{BASE_URL}/auth/me", cookies=cookies)
-    if r1.status_code == 200:
-        data1 = r1.json()
-        if 'password_hash' in data1:
-            log_fail("SECURITY ISSUE: GET /api/auth/me leaks password_hash")
-            all_pass = False
+    # Test 7b: Verify customer's total_spent increases
+    print("   Verifying customer total_spent...")
+    resp = requests.get(f"{BASE_URL}/admin/customers", cookies=cookies)
+    if resp.status_code == 200:
+        customers = resp.json()
+        customer = next((c for c in customers if c['user_id'] == customer_user_id), None)
+        if customer:
+            # For COD orders, total_spent should include the order (non-cancelled)
+            if customer['total_spent'] >= order_total:
+                log_test("Data integrity - customer total_spent updated", True)
+                print(f"   Customer total_spent: ₹{customer['total_spent']}")
+            else:
+                log_test("Data integrity - customer total_spent updated", False,
+                         f"Expected >= {order_total}, got {customer['total_spent']}")
         else:
-            log_pass("GET /api/auth/me does NOT leak password_hash")
+            log_test("Data integrity - customer total_spent updated", False, 
+                     "Customer not found in customers list")
     else:
-        log_fail(f"GET /api/auth/me failed: {r1.status_code}")
-        all_pass = False
+        log_test("Data integrity - customer total_spent updated", False, 
+                 f"Status {resp.status_code}")
     
-    # Check GET /api/admin/staff
-    r2 = requests.get(f"{BASE_URL}/admin/staff", cookies=cookies)
-    if r2.status_code == 200:
-        data2 = r2.json()
-        has_leak = False
-        for user in data2:
-            if 'password_hash' in user:
-                has_leak = True
-                break
-        if has_leak:
-            log_fail("SECURITY ISSUE: GET /api/admin/staff leaks password_hash")
-            all_pass = False
+    # Test 7c: Verify stats revenue only counts Paid orders (COD should be Pending)
+    print("   Verifying stats revenue (should not include COD until Delivered)...")
+    resp = requests.get(f"{BASE_URL}/admin/stats", cookies=cookies)
+    if resp.status_code == 200:
+        new_stats = resp.json()
+        # COD order should not increase revenue until marked as Delivered
+        if new_stats['revenue'] == initial_stats['revenue']:
+            log_test("Data integrity - revenue excludes COD pending", True)
         else:
-            log_pass("GET /api/admin/staff does NOT leak password_hash")
-    else:
-        log_fail(f"GET /api/admin/staff failed: {r2.status_code}")
-        all_pass = False
-    
-    # Check GET /api/admin/customers
-    r3 = requests.get(f"{BASE_URL}/admin/customers", cookies=cookies)
-    if r3.status_code == 200:
-        data3 = r3.json()
-        has_leak = False
-        for user in data3:
-            if 'password_hash' in user:
-                has_leak = True
-                break
-        if has_leak:
-            log_fail("SECURITY ISSUE: GET /api/admin/customers leaks password_hash")
-            all_pass = False
+            log_test("Data integrity - revenue excludes COD pending", False,
+                     f"Revenue changed from {initial_stats['revenue']} to {new_stats['revenue']}")
+        
+        # Orders count should increase
+        if new_stats['orders'] > initial_stats['orders']:
+            log_test("Data integrity - orders count increased", True)
         else:
-            log_pass("GET /api/admin/customers does NOT leak password_hash")
+            log_test("Data integrity - orders count increased", False,
+                     f"Orders count: {initial_stats['orders']} -> {new_stats['orders']}")
     else:
-        log_fail(f"GET /api/admin/customers failed: {r3.status_code}")
-        all_pass = False
+        log_test("Data integrity - stats check", False, f"Status {resp.status_code}")
     
-    # Check GET /api/admin/offline-customers
-    r4 = requests.get(f"{BASE_URL}/admin/offline-customers", cookies=cookies)
-    if r4.status_code == 200:
-        data4 = r4.json()
-        has_leak = False
-        for user in data4:
-            if 'password_hash' in user:
-                has_leak = True
-                break
-        if has_leak:
-            log_fail("SECURITY ISSUE: GET /api/admin/offline-customers leaks password_hash")
-            all_pass = False
+    # Test 7d: Mark order as Delivered and verify payment_status becomes Paid
+    print("   Marking order as Delivered...")
+    resp = requests.patch(f"{BASE_URL}/admin/orders/{order_id}",
+                         json={"status": "Delivered"}, cookies=cookies)
+    
+    if resp.status_code == 200:
+        updated_order = resp.json()
+        if updated_order.get('payment_status') == 'Paid':
+            log_test("Data integrity - COD payment_status becomes Paid on Delivered", True)
         else:
-            log_pass("GET /api/admin/offline-customers does NOT leak password_hash")
+            log_test("Data integrity - COD payment_status becomes Paid on Delivered", False,
+                     f"payment_status is {updated_order.get('payment_status')}")
+        
+        # Test 7e: Verify revenue now includes this order
+        print("   Verifying revenue updated after Delivered...")
+        resp = requests.get(f"{BASE_URL}/admin/stats", cookies=cookies)
+        if resp.status_code == 200:
+            final_stats = resp.json()
+            expected_revenue = initial_stats['revenue'] + order_total
+            if abs(final_stats['revenue'] - expected_revenue) < 0.01:
+                log_test("Data integrity - revenue updated after Delivered", True)
+                print(f"   Revenue: {initial_stats['revenue']} -> {final_stats['revenue']}")
+            else:
+                log_test("Data integrity - revenue updated after Delivered", False,
+                         f"Expected {expected_revenue}, got {final_stats['revenue']}")
+        else:
+            log_test("Data integrity - revenue check", False, f"Status {resp.status_code}")
     else:
-        log_fail(f"GET /api/admin/offline-customers failed: {r4.status_code}")
-        all_pass = False
-    
-    return all_pass
-
-def test_regression():
-    """Test 11: Regression - existing endpoints still work"""
-    log_test("Test 11: Regression - existing endpoints still work")
-    
-    all_pass = True
-    
-    # Test GET /api/products
-    r1 = requests.get(f"{BASE_URL}/products")
-    if r1.status_code == 200:
-        log_pass("GET /api/products still works")
-    else:
-        log_fail(f"GET /api/products failed: {r1.status_code}")
-        all_pass = False
-    
-    # Test POST /api/auth/admin-login with restored credentials
-    r2 = requests.post(f"{BASE_URL}/auth/admin-login", json={
-        "email": ADMIN_EMAIL,
-        "password": ADMIN_PASSWORD
-    })
-    if r2.status_code == 200:
-        log_pass("POST /api/auth/admin-login still works with restored credentials")
-    else:
-        log_fail(f"POST /api/auth/admin-login failed: {r2.status_code}")
-        all_pass = False
-    
-    return all_pass
+        log_test("Data integrity - mark as Delivered", False, f"Status {resp.status_code}")
 
 def main():
-    print(f"\n{Colors.BLUE}{'='*70}{Colors.END}")
-    print(f"{Colors.BLUE}Retro Farms Backend API Test Suite{Colors.END}")
-    print(f"{Colors.BLUE}Testing: Self-Service Credential Update (PATCH /api/auth/me){Colors.END}")
-    print(f"{Colors.BLUE}{'='*70}{Colors.END}")
+    print("=" * 80)
+    print("🧪 Retro Farms Backend API Test Suite - Refactored Endpoints Verification")
+    print("=" * 80)
+    print(f"Testing against: {BASE_URL}")
+    print(f"Admin credentials: {ADMIN_EMAIL}")
     
-    tests = [
-        test_unauthenticated_returns_401,
-        test_update_profile_as_admin,
-        test_change_admin_email,
-        test_email_conflict,
-        test_change_password_with_verification,
-        test_password_change_fails_without_current,
-        test_password_change_fails_with_wrong_current,
-        test_password_too_short,
-        test_staff_profile_update,
-        test_no_password_hash_leak,
-        test_regression,
-    ]
+    # Login as admin
+    cookies = admin_login()
+    if not cookies:
+        print("\n❌ CRITICAL: Admin login failed. Cannot proceed with tests.")
+        return
     
-    passed = 0
-    failed = 0
+    # Run all tests
+    initial_stats = test_admin_stats(cookies)
+    test_admin_orders_pagination(cookies)
+    test_admin_customers(cookies)
+    test_customer_orders_endpoint(cookies)
+    test_offline_customers(cookies)
+    test_regression_endpoints(cookies)
     
-    for test in tests:
-        try:
-            if test():
-                passed += 1
-            else:
-                failed += 1
-        except Exception as e:
-            log_fail(f"Test raised exception: {e}")
-            failed += 1
+    if initial_stats:
+        test_data_integrity(cookies, initial_stats)
     
-    print(f"\n{Colors.BLUE}{'='*70}{Colors.END}")
-    print(f"{Colors.GREEN}Passed: {passed}{Colors.END}")
-    print(f"{Colors.RED}Failed: {failed}{Colors.END}")
-    print(f"{Colors.BLUE}{'='*70}{Colors.END}\n")
+    # Print summary
+    print("\n" + "=" * 80)
+    print("📊 TEST SUMMARY")
+    print("=" * 80)
+    print(f"✅ Passed: {tests_passed}")
+    print(f"❌ Failed: {tests_failed}")
+    print(f"📈 Success Rate: {tests_passed}/{tests_passed + tests_failed} ({100*tests_passed/(tests_passed+tests_failed):.1f}%)")
     
-    return 0 if failed == 0 else 1
+    if failures:
+        print("\n❌ FAILED TESTS:")
+        for i, failure in enumerate(failures, 1):
+            print(f"{i}. {failure}")
+    else:
+        print("\n🎉 ALL TESTS PASSED!")
+    
+    print("=" * 80)
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

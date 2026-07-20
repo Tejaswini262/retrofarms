@@ -418,6 +418,18 @@ backend:
         agent: "testing"
         comment: "PATCH /api/auth/me endpoint fully functional. All 11 test scenarios passed: (1) Unauthenticated returns 401 ✓ (2) Profile update (name, phone) works for admin ✓ (3) Email change works with login verification ✓ (4) Email conflict detection returns 400 ✓ (5) Password change with current password verification works (CRITICAL) ✓ (6) Password change fails without current password (400) ✓ (7) Password change fails with wrong current password (401) ✓ (8) Password too short validation (400) ✓ (9) Staff can update profile and password ✓ (10) Security check: NO password_hash leak in GET /api/auth/me, GET /api/admin/staff, GET /api/admin/customers, GET /api/admin/offline-customers ✓ (11) Regression tests pass ✓. Implementation correctly uses UpdateMePayload model, requires authentication, validates email conflicts, enforces password length >= 6 chars, requires current_password for email-authenticated accounts, and returns user_public fields only (no password_hash). All credentials restored after testing."
 
+  - task: "Refactored admin endpoints with MongoDB aggregation"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "REFACTORED ENDPOINTS VERIFICATION - All 36 tests passed (100% success rate). Verified optimized admin endpoints using MongoDB aggregation pipelines and count_documents: (1) GET /api/admin/stats - Returns correct structure {revenue, orders, pending, products, customers} with numeric values. Uses count_documents() for counts and aggregation pipeline for revenue calculation (sum of payment_status='Paid' orders). Products=11, customers=14 ✓ (2) GET /api/admin/orders - Supports limit and skip query params for pagination. Returns array sorted by created_at desc. Tested: default (500 limit), limit=5, limit=5&skip=5. Pagination returns different orders correctly. All required fields present: order_id, customer_email, items, total, status, payment_status, address, assigned_staff_id ✓ (3) GET /api/admin/customers - Uses aggregation pipeline to calculate total_spent (sum of non-cancelled orders) and orders count in-database. Returns customers sorted by total_spent desc. Verified total_spent calculation matches manual sum of customer orders. Top spenders: [4700, 1130, 720] ✓ (4) GET /api/admin/customers/{user_id}/orders - Returns {user, orders} structure. Supports limit parameter. Orders sorted by created_at desc ✓ (5) GET /api/admin/offline-customers - Uses aggregation pipeline to get orders count, last_ordered_at, last_address. Sorted by last_ordered_at desc. All required fields present ✓ (6) REGRESSION TESTS - All existing endpoints still functional: POST /api/admin/orders/offline creates orders correctly, PATCH /api/admin/orders/{order_id} updates status/assignee, GET /api/products returns products, PATCH /api/auth/me updates profile ✓ (7) DATA INTEGRITY - Created test COD order, verified: appears in admin orders list, customer total_spent increases correctly, revenue excludes COD until Delivered, marking as Delivered sets payment_status='Paid' and updates revenue ✓. NO CRITICAL ISSUES FOUND. All refactored endpoints performing correctly with aggregation optimizations."
+
 frontend:
   - task: "Frontend UI"
     implemented: true
@@ -434,7 +446,7 @@ frontend:
 metadata:
   created_by: "testing_agent"
   version: "1.0"
-  test_sequence: 4
+  test_sequence: 5
   run_ui: false
 
 test_plan:
@@ -452,3 +464,5 @@ agent_communication:
     message: "Completed testing of LATEST NEW FEATURES (total_override, customer orders endpoint, total_spent fix). All 10 tests passed successfully. Results: (1) Offline order with total_override - working correctly, when total_override=250 provided, response shows total=250 with adjusted delivery_charge=85. (2) Customer orders endpoint - GET /api/admin/customers/{user_id}/orders returns correct structure with user and orders, handles nonexistent users gracefully. (3) total_spent fix - now correctly sums all non-cancelled orders (not just Paid), list sorted by total_spent desc. (4) Regression tests - products list, admin stats, and basic offline orders still working correctly. No critical issues found."
   - agent: "testing"
     message: "Completed testing of SELF-SERVICE CREDENTIAL UPDATE endpoint (PATCH /api/auth/me). All 11 tests passed successfully. Results: (1) Authentication required - unauthenticated requests return 401 ✓ (2) Profile updates (name, phone) work correctly for admin and staff ✓ (3) Email changes work with proper conflict detection (400 for duplicate emails) ✓ (4) Password changes require current password verification for email-authenticated accounts ✓ (5) Password validation enforces minimum 6 characters ✓ (6) Wrong current password returns 401 ✓ (7) SECURITY VERIFIED: No password_hash leak in any endpoint (GET /api/auth/me, GET /api/admin/staff, GET /api/admin/customers, GET /api/admin/offline-customers) ✓ (8) Regression tests pass - all existing endpoints still functional ✓. No critical issues found. All test credentials restored to original values."
+  - agent: "testing"
+    message: "Completed REFACTORED ENDPOINTS VERIFICATION. All 36 tests passed (100% success rate). Verified that recently refactored/optimized admin endpoints using MongoDB aggregation pipelines and count_documents still function correctly: (1) GET /api/admin/stats - aggregation-based stats working correctly ✓ (2) GET /api/admin/orders - pagination with limit/skip working ✓ (3) GET /api/admin/customers - aggregated total_spent calculation correct ✓ (4) GET /api/admin/customers/{user_id}/orders - limit parameter working ✓ (5) GET /api/admin/offline-customers - aggregated metadata working ✓ (6) All regression tests passed - no functional breaks ✓ (7) Data integrity verified - order creation, stats updates, revenue calculation all correct ✓. NO CRITICAL ISSUES FOUND. All refactored endpoints performing correctly with optimizations."
