@@ -405,6 +405,19 @@ backend:
         agent: "testing"
         comment: "GET /api/admin/customers now correctly calculates total_spent by summing all non-cancelled orders (previously only counted 'Paid' orders). Verified 8/8 customers with orders show total_spent > 0. List is correctly sorted by total_spent descending"
 
+
+  - task: "Self-service credential update endpoint"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "PATCH /api/auth/me endpoint fully functional. All 11 test scenarios passed: (1) Unauthenticated returns 401 ✓ (2) Profile update (name, phone) works for admin ✓ (3) Email change works with login verification ✓ (4) Email conflict detection returns 400 ✓ (5) Password change with current password verification works (CRITICAL) ✓ (6) Password change fails without current password (400) ✓ (7) Password change fails with wrong current password (401) ✓ (8) Password too short validation (400) ✓ (9) Staff can update profile and password ✓ (10) Security check: NO password_hash leak in GET /api/auth/me, GET /api/admin/staff, GET /api/admin/customers, GET /api/admin/offline-customers ✓ (11) Regression tests pass ✓. Implementation correctly uses UpdateMePayload model, requires authentication, validates email conflicts, enforces password length >= 6 chars, requires current_password for email-authenticated accounts, and returns user_public fields only (no password_hash). All credentials restored after testing."
+
 frontend:
   - task: "Frontend UI"
     implemented: true
@@ -421,7 +434,7 @@ frontend:
 metadata:
   created_by: "testing_agent"
   version: "1.0"
-  test_sequence: 3
+  test_sequence: 4
   run_ui: false
 
 test_plan:
@@ -437,3 +450,5 @@ agent_communication:
     message: "Completed testing of NEW endpoints (Offline Orders + Product CRUD). All 20 new tests passed successfully. Total: 50 tests passed, 0 failed. New features working correctly: (1) Offline orders - admin/staff can create offline orders with synthetic email generation, correct totals, and source tracking. (2) Product CRUD - full CRUD operations for products and variants with proper admin-only access control. (3) Regression tests - all existing endpoints still working correctly."
   - agent: "testing"
     message: "Completed testing of LATEST NEW FEATURES (total_override, customer orders endpoint, total_spent fix). All 10 tests passed successfully. Results: (1) Offline order with total_override - working correctly, when total_override=250 provided, response shows total=250 with adjusted delivery_charge=85. (2) Customer orders endpoint - GET /api/admin/customers/{user_id}/orders returns correct structure with user and orders, handles nonexistent users gracefully. (3) total_spent fix - now correctly sums all non-cancelled orders (not just Paid), list sorted by total_spent desc. (4) Regression tests - products list, admin stats, and basic offline orders still working correctly. No critical issues found."
+  - agent: "testing"
+    message: "Completed testing of SELF-SERVICE CREDENTIAL UPDATE endpoint (PATCH /api/auth/me). All 11 tests passed successfully. Results: (1) Authentication required - unauthenticated requests return 401 ✓ (2) Profile updates (name, phone) work correctly for admin and staff ✓ (3) Email changes work with proper conflict detection (400 for duplicate emails) ✓ (4) Password changes require current password verification for email-authenticated accounts ✓ (5) Password validation enforces minimum 6 characters ✓ (6) Wrong current password returns 401 ✓ (7) SECURITY VERIFIED: No password_hash leak in any endpoint (GET /api/auth/me, GET /api/admin/staff, GET /api/admin/customers, GET /api/admin/offline-customers) ✓ (8) Regression tests pass - all existing endpoints still functional ✓. No critical issues found. All test credentials restored to original values."

@@ -4,10 +4,10 @@ import api from '../lib/api';
 import { useApp } from '../context/AppContext';
 import {
   TrendingUp, ShoppingBag, Truck, Package, Users, Trash2, X, Plus, Edit3, Save,
-  Upload, ImageIcon, Minus, MapPin, ExternalLink,
+  Upload, ImageIcon, Minus, MapPin, ExternalLink, Lock, User as UserIcon,
 } from 'lucide-react';
 
-const tabs = ['Inventory', 'Orders', 'Revenue / Customers', 'Staff'];
+const tabs = ['Inventory', 'Orders', 'Revenue / Customers', 'Farmers', 'Staff', 'Account'];
 
 const StatCard = ({ icon: Icon, value, label }) => (
   <div className="bg-white rounded-2xl p-6 border border-[#E4D9C1] shadow-sm">
@@ -59,9 +59,17 @@ const OfflineOrderModal = ({ open, onClose, onCreated, products }) => {
   const [customTotal, setCustomTotal] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [pastCustomers, setPastCustomers] = useState([]);
+  const [custQuery, setCustQuery] = useState('');
+  const [showSuggest, setShowSuggest] = useState(false);
 
   useEffect(() => {
-    if (!open) { setCustomer({ name: '', phone: '', email: '' }); setLines([]); setPayment('cash'); setNotes(''); setCustomTotal(''); setError(''); }
+    if (open) {
+      api.get('/admin/offline-customers').then((r) => setPastCustomers(r.data || [])).catch(() => {});
+    } else {
+      setCustomer({ name: '', phone: '', email: '' }); setLines([]); setPayment('cash'); setNotes(''); setCustomTotal(''); setError('');
+      setCustQuery(''); setShowSuggest(false);
+    }
   }, [open]);
 
   if (!open) return null;
@@ -71,6 +79,19 @@ const OfflineOrderModal = ({ open, onClose, onCreated, products }) => {
   const hasCustomTotal = customTotal !== '' && !isNaN(parseInt(customTotal, 10));
   const total = hasCustomTotal ? parseInt(customTotal, 10) : subtotal + autoDelivery;
   const delivery = hasCustomTotal ? Math.max(0, total - subtotal) : autoDelivery;
+
+  const q = custQuery.trim().toLowerCase();
+  const suggestions = q ? pastCustomers.filter((c) =>
+    (c.name || '').toLowerCase().includes(q) ||
+    (c.phone || '').includes(q) ||
+    (c.email || '').toLowerCase().includes(q),
+  ).slice(0, 8) : pastCustomers.slice(0, 8);
+
+  const pickPast = (c) => {
+    setCustomer({ name: c.name || '', phone: c.phone || '', email: c.email && !c.email.includes('@retrofarms.offline') ? c.email : '' });
+    setCustQuery(`${c.name || ''} · ${c.phone || ''}`);
+    setShowSuggest(false);
+  };
 
   const addLine = () => setLines((L) => [...L, { slug: '', variant_id: '', qty: 1, price: 0 }]);
   const removeLine = (i) => setLines((L) => L.filter((_, idx) => idx !== i));
@@ -114,6 +135,43 @@ const OfflineOrderModal = ({ open, onClose, onCreated, products }) => {
           <button type="button" onClick={onClose} className="text-[#7A6A55] hover:text-[#2B1D11]"><X size={22} /></button>
         </div>
         <div className="p-8 space-y-6">
+          <div>
+            <div className="text-xs text-[#7A6A55] uppercase tracking-widest mb-2">Reuse past customer</div>
+            <div className="relative">
+              <input
+                value={custQuery}
+                onChange={(e) => { setCustQuery(e.target.value); setShowSuggest(true); }}
+                onFocus={() => setShowSuggest(true)}
+                placeholder="Search by name, phone, email…"
+                className="w-full px-4 py-3 border border-[#E4D9C1] rounded-xl focus:outline-none focus:border-[#2B1D11] bg-white"
+              />
+              {showSuggest && suggestions.length > 0 && (
+                <div className="absolute z-30 left-0 right-0 mt-1 bg-white border border-[#E4D9C1] rounded-xl shadow-lg max-h-64 overflow-y-auto">
+                  {suggestions.map((c) => (
+                    <button key={c.user_id} type="button" onClick={() => pickPast(c)}
+                      className="w-full text-left px-4 py-3 hover:bg-[#F7F1E5] border-b border-[#EFE4CB] last:border-b-0">
+                      <div className="flex justify-between gap-3">
+                        <div className="text-[#2B1D11] font-medium">{c.name || '—'}</div>
+                        <div className="text-xs text-[#7A6A55]">{c.orders} order{c.orders === 1 ? '' : 's'}</div>
+                      </div>
+                      <div className="text-xs text-[#7A6A55] flex flex-wrap gap-x-3">
+                        {c.phone && <span>{c.phone}</span>}
+                        {c.email && !c.email.includes('@retrofarms.offline') && <span>{c.email}</span>}
+                        {c.provider && <span className="uppercase tracking-widest">{c.provider}</span>}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+              {showSuggest && (
+                <button type="button" onClick={() => setShowSuggest(false)} className="absolute right-3 top-1/2 -translate-y-1/2 text-[#7A6A55] hover:text-[#2B1D11]">
+                  <X size={16} />
+                </button>
+              )}
+            </div>
+            <div className="text-xs text-[#7A6A55] mt-1">Or fill in the fields below for a brand-new customer.</div>
+          </div>
+
           <div className="grid sm:grid-cols-3 gap-3">
             <input required value={customer.name} onChange={(e) => setCustomer((c) => ({ ...c, name: e.target.value }))} placeholder="Customer name*" className="px-4 py-3 border border-[#E4D9C1] rounded-xl focus:outline-none focus:border-[#2B1D11]" />
             <input required value={customer.phone} onChange={(e) => setCustomer((c) => ({ ...c, phone: e.target.value }))} placeholder="Phone*" className="px-4 py-3 border border-[#E4D9C1] rounded-xl focus:outline-none focus:border-[#2B1D11]" />
@@ -374,9 +432,169 @@ const ProductEditorModal = ({ open, mode, initial, onClose, onSaved }) => {
   );
 };
 
+/* --------------- Farmer Editor Modal --------------- */
+const FarmerEditorModal = ({ open, mode, initial, onClose, onSaved }) => {
+  const [form, setForm] = useState({ name: '', creds: '', role: '', photo: '', order: 0 });
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const fileRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    if (mode === 'edit' && initial) setForm({
+      name: initial.name || '', creds: initial.creds || '', role: initial.role || '',
+      photo: initial.photo || '', order: initial.order || 0,
+    });
+    else setForm({ name: '', creds: '', role: '', photo: '', order: 0 });
+    setError('');
+  }, [open, mode, initial]);
+
+  if (!open) return null;
+
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  const handleFile = async (e) => {
+    const file = e.target.files?.[0]; if (!file) return;
+    if (file.size > 3 * 1024 * 1024) { setError('Photo too large (max 3MB)'); return; }
+    set('photo', await fileToDataUrl(file));
+  };
+
+  const submit = async (e) => {
+    e.preventDefault(); setError('');
+    if (!form.name) { setError('Name is required'); return; }
+    setBusy(true);
+    try {
+      if (mode === 'edit') {
+        await api.put(`/admin/farmers/${initial.farmer_id}`, {
+          name: form.name, creds: form.creds, role: form.role, photo: form.photo, order: parseInt(form.order || 0, 10),
+        });
+      } else {
+        await api.post('/admin/farmers', {
+          name: form.name, creds: form.creds, role: form.role, photo: form.photo, order: parseInt(form.order || 0, 10),
+        });
+      }
+      onSaved?.(); onClose();
+    } catch (e) { setError(e.response?.data?.detail || 'Save failed'); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-start justify-center p-4 overflow-y-auto" onClick={onClose}>
+      <form onSubmit={submit} onClick={(e) => e.stopPropagation()} className="bg-white rounded-2xl max-w-2xl w-full my-8">
+        <div className="flex items-center justify-between px-8 py-5 border-b border-[#EFE4CB]">
+          <div>
+            <div className="text-[#C96C1B] tracking-[0.3em] text-xs">{mode === 'edit' ? 'EDIT FARMER' : 'NEW FARMER'}</div>
+            <div className="font-serif text-2xl text-[#2B1D11]">{mode === 'edit' ? initial?.name : 'Add a farmer'}</div>
+          </div>
+          <button type="button" onClick={onClose} className="text-[#7A6A55] hover:text-[#2B1D11]"><X size={22} /></button>
+        </div>
+        <div className="p-8 space-y-4">
+          <div className="grid md:grid-cols-[180px_1fr] gap-5">
+            <div>
+              <div className="text-xs text-[#7A6A55] uppercase tracking-widest mb-2">Photo</div>
+              <div className="aspect-[4/5] rounded-xl border border-[#E4D9C1] bg-[#FBF7EC] overflow-hidden flex items-center justify-center">
+                {form.photo ? <img src={form.photo} alt="" className="w-full h-full object-cover" /> : <ImageIcon size={40} className="text-[#B8A98C]" />}
+              </div>
+              <input ref={fileRef} onChange={handleFile} type="file" accept="image/*" className="hidden" />
+              <button type="button" onClick={() => fileRef.current?.click()} className="mt-2 w-full inline-flex items-center justify-center gap-2 border border-[#4E6A3C] text-[#4E6A3C] hover:bg-[#4E6A3C] hover:text-white rounded-lg px-3 py-2 text-sm">
+                <Upload size={14} /> Upload photo
+              </button>
+              <input value={form.photo?.startsWith('data:') ? '' : (form.photo || '')} onChange={(e) => set('photo', e.target.value)} placeholder="or paste image URL" className="mt-2 w-full px-3 py-2 border border-[#E4D9C1] rounded-lg text-xs" />
+            </div>
+            <div className="space-y-3">
+              <input required value={form.name} onChange={(e) => set('name', e.target.value)} placeholder="Full name (with title)" className="w-full px-4 py-3 border border-[#E4D9C1] rounded-xl focus:outline-none focus:border-[#2B1D11]" />
+              <input value={form.creds} onChange={(e) => set('creds', e.target.value)} placeholder="Credentials (e.g. M.Sc, Ph.D)" className="w-full px-4 py-3 border border-[#E4D9C1] rounded-xl focus:outline-none focus:border-[#2B1D11]" />
+              <input value={form.role} onChange={(e) => set('role', e.target.value)} placeholder="Role (e.g. Founder & Farm Director)" className="w-full px-4 py-3 border border-[#E4D9C1] rounded-xl focus:outline-none focus:border-[#2B1D11]" />
+              <input type="number" value={form.order} onChange={(e) => set('order', e.target.value)} placeholder="Display order (lower first)" className="w-full px-4 py-3 border border-[#E4D9C1] rounded-xl focus:outline-none focus:border-[#2B1D11]" />
+            </div>
+          </div>
+          {error && <div className="text-sm text-red-600">{error}</div>}
+        </div>
+        <div className="flex justify-end gap-3 px-8 py-5 border-t border-[#EFE4CB]">
+          <button type="button" onClick={onClose} className="px-5 py-2 rounded-full text-[#2B1D11] hover:bg-[#F7F1E5]">Cancel</button>
+          <button disabled={busy} className="bg-[#2B1D11] hover:bg-[#3A2818] text-white px-6 py-2 rounded-full inline-flex items-center gap-2 disabled:opacity-70">
+            <Save size={16} /> {busy ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+};
+
+/* --------------- Account (self-service credential update) --------------- */
+const AccountForm = ({ user, onUpdated }) => {
+  const [form, setForm] = useState({ name: user.name || '', email: user.email || '', phone: user.phone || '' });
+  const [pwd, setPwd] = useState({ current: '', next: '', confirm: '' });
+  const [saveMsg, setSaveMsg] = useState('');
+  const [saveErr, setSaveErr] = useState('');
+  const [pwdMsg, setPwdMsg] = useState('');
+  const [pwdErr, setPwdErr] = useState('');
+
+  const saveProfile = async (e) => {
+    e.preventDefault(); setSaveMsg(''); setSaveErr('');
+    try {
+      const r = await api.patch('/auth/me', { name: form.name, email: form.email, phone: form.phone });
+      setSaveMsg('Profile updated.');
+      onUpdated?.(r.data);
+    } catch (err) { setSaveErr(err.response?.data?.detail || 'Update failed'); }
+  };
+
+  const changePassword = async (e) => {
+    e.preventDefault(); setPwdMsg(''); setPwdErr('');
+    if (!pwd.next || pwd.next.length < 6) { setPwdErr('New password must be at least 6 characters.'); return; }
+    if (pwd.next !== pwd.confirm) { setPwdErr('Passwords do not match.'); return; }
+    try {
+      await api.patch('/auth/me', { current_password: pwd.current, new_password: pwd.next });
+      setPwd({ current: '', next: '', confirm: '' });
+      setPwdMsg('Password changed. Use the new password next time you sign in.');
+    } catch (err) { setPwdErr(err.response?.data?.detail || 'Password change failed'); }
+  };
+
+  return (
+    <div className="grid lg:grid-cols-2 gap-6">
+      <form onSubmit={saveProfile} className="bg-white rounded-2xl border border-[#E4D9C1] p-6 md:p-8">
+        <div className="flex items-center gap-3 mb-6">
+          <div className="w-11 h-11 rounded-full bg-[#EFE4CB] text-[#5C3B1E] flex items-center justify-center"><UserIcon size={20} /></div>
+          <div>
+            <h3 className="font-serif text-2xl text-[#2B1D11]">Profile</h3>
+            <div className="text-xs text-[#7A6A55]">Update your name, email and contact number.</div>
+          </div>
+        </div>
+        <label className="block text-xs text-[#7A6A55] mb-1">Full name</label>
+        <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="w-full px-4 py-3 border border-[#E4D9C1] rounded-xl mb-3 focus:outline-none focus:border-[#2B1D11]" />
+        <label className="block text-xs text-[#7A6A55] mb-1">Email</label>
+        <input type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} className="w-full px-4 py-3 border border-[#E4D9C1] rounded-xl mb-3 focus:outline-none focus:border-[#2B1D11]" />
+        <label className="block text-xs text-[#7A6A55] mb-1">Phone</label>
+        <input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} className="w-full px-4 py-3 border border-[#E4D9C1] rounded-xl mb-4 focus:outline-none focus:border-[#2B1D11]" />
+        {saveErr && <div className="text-sm text-red-600 mb-3">{saveErr}</div>}
+        {saveMsg && <div className="text-sm text-[#4E6A3C] mb-3">{saveMsg}</div>}
+        <button className="w-full bg-[#2B1D11] hover:bg-[#3A2818] text-white rounded-full py-3">Save profile</button>
+      </form>
+
+      <form onSubmit={changePassword} className="bg-white rounded-2xl border border-[#E4D9C1] p-6 md:p-8">
+        <div className="flex items-center gap-3 mb-6">
+          <div className="w-11 h-11 rounded-full bg-[#EFE4CB] text-[#5C3B1E] flex items-center justify-center"><Lock size={20} /></div>
+          <div>
+            <h3 className="font-serif text-2xl text-[#2B1D11]">Password</h3>
+            <div className="text-xs text-[#7A6A55]">Change your dashboard password. If you're still on the default, please change it now.</div>
+          </div>
+        </div>
+        <label className="block text-xs text-[#7A6A55] mb-1">Current password</label>
+        <input type="password" autoComplete="current-password" value={pwd.current} onChange={(e) => setPwd({ ...pwd, current: e.target.value })} className="w-full px-4 py-3 border border-[#E4D9C1] rounded-xl mb-3 focus:outline-none focus:border-[#2B1D11]" />
+        <label className="block text-xs text-[#7A6A55] mb-1">New password (min 6 characters)</label>
+        <input type="password" autoComplete="new-password" value={pwd.next} onChange={(e) => setPwd({ ...pwd, next: e.target.value })} className="w-full px-4 py-3 border border-[#E4D9C1] rounded-xl mb-3 focus:outline-none focus:border-[#2B1D11]" />
+        <label className="block text-xs text-[#7A6A55] mb-1">Confirm new password</label>
+        <input type="password" autoComplete="new-password" value={pwd.confirm} onChange={(e) => setPwd({ ...pwd, confirm: e.target.value })} className="w-full px-4 py-3 border border-[#E4D9C1] rounded-xl mb-4 focus:outline-none focus:border-[#2B1D11]" />
+        {pwdErr && <div className="text-sm text-red-600 mb-3">{pwdErr}</div>}
+        {pwdMsg && <div className="text-sm text-[#4E6A3C] mb-3">{pwdMsg}</div>}
+        <button className="w-full bg-[#4E6A3C] hover:bg-[#3D5530] text-white rounded-full py-3">Change password</button>
+      </form>
+    </div>
+  );
+};
+
 /* --------------- Main Dashboard --------------- */
 const AdminDashboard = () => {
-  const { user, authLoading } = useApp();
+  const { user, setUser, authLoading } = useApp();
   const [activeTab, setActiveTab] = useState('Inventory');
   const [stats, setStats] = useState({ revenue: 0, orders: 0, pending: 0, products: 0, customers: 0 });
   const [products, setProducts] = useState([]);
@@ -390,16 +608,20 @@ const AdminDashboard = () => {
   const [editorMode, setEditorMode] = useState('create');
   const [editorProduct, setEditorProduct] = useState(null);
   const [customerOrders, setCustomerOrders] = useState(null); // { user, orders }
+  const [farmers, setFarmers] = useState([]);
+  const [farmerEditorOpen, setFarmerEditorOpen] = useState(false);
+  const [farmerEditorMode, setFarmerEditorMode] = useState('create');
+  const [farmerEditing, setFarmerEditing] = useState(null);
   const [newStaff, setNewStaff] = useState({ name: '', email: '', phone: '', password: '', role: 'staff' });
   const [staffErr, setStaffErr] = useState('');
 
   const reload = useCallback(async () => {
     try {
-      const [s, p, o, c, st] = await Promise.all([
+      const [s, p, o, c, st, fs] = await Promise.all([
         api.get('/admin/stats'), api.get('/products'), api.get('/admin/orders'),
-        api.get('/admin/customers'), api.get('/admin/staff'),
+        api.get('/admin/customers'), api.get('/admin/staff'), api.get('/farmers'),
       ]);
-      setStats(s.data); setProducts(p.data); setOrders(o.data); setCustomers(c.data); setStaff(st.data);
+      setStats(s.data); setProducts(p.data); setOrders(o.data); setCustomers(c.data); setStaff(st.data); setFarmers(fs.data);
     } catch (e) { /* ignore */ }
   }, []);
 
@@ -645,6 +867,53 @@ const AdminDashboard = () => {
           </div>
         )}
 
+        {activeTab === 'Farmers' && (
+          <div>
+            {isAdmin && (
+              <div className="flex justify-end mb-3">
+                <button onClick={() => { setFarmerEditorMode('create'); setFarmerEditing(null); setFarmerEditorOpen(true); }}
+                  className="inline-flex items-center gap-2 bg-[#2B1D11] hover:bg-[#3A2818] text-white px-4 py-2 rounded-full text-sm">
+                  <Plus size={15} /> Add farmer
+                </button>
+              </div>
+            )}
+            <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+              {farmers.map((f) => (
+                <div key={f.farmer_id} className="bg-white rounded-2xl border border-[#E4D9C1] overflow-hidden">
+                  <div className="aspect-[4/5] bg-[#EFE4CB] overflow-hidden">
+                    {f.photo ? <img src={f.photo} alt={f.name} className="w-full h-full object-cover" /> :
+                      <div className="w-full h-full flex items-center justify-center font-serif text-6xl text-[#C4A97F]">
+                        {(f.name || '?').split(' ').map((s) => s[0]).join('').slice(0, 2)}
+                      </div>}
+                  </div>
+                  <div className="p-5">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <h3 className="font-serif text-xl text-[#2B1D11]">{f.name}</h3>
+                        <div className="text-sm text-[#7A6A55]">{f.creds}</div>
+                        <div className="inline-block mt-2 px-3 py-1 rounded-full bg-[#EFE4CB] text-xs text-[#4E6A3C]">{f.role}</div>
+                        <div className="text-xs text-[#B8A98C] mt-2">Display order: {f.order ?? 0}</div>
+                      </div>
+                      {isAdmin && (
+                        <div className="flex flex-col gap-1">
+                          <button onClick={() => { setFarmerEditorMode('edit'); setFarmerEditing(f); setFarmerEditorOpen(true); }} className="p-2 text-[#2B1D11] hover:bg-[#F7F1E5] rounded-lg" title="Edit"><Edit3 size={16} /></button>
+                          <button onClick={async () => {
+                            if (!window.confirm('Remove this farmer?')) return;
+                            try { await api.delete(`/admin/farmers/${f.farmer_id}`); reload(); } catch (e) { alert(e.response?.data?.detail || 'Failed'); }
+                          }} className="p-2 text-red-500 hover:bg-red-50 rounded-lg" title="Delete"><Trash2 size={16} /></button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
+              {farmers.length === 0 && (
+                <div className="col-span-full text-center py-14 text-[#7A6A55]">No farmers yet — click "Add farmer" to create one.</div>
+              )}
+            </div>
+          </div>
+        )}
+
         {activeTab === 'Staff' && (
           <div className="grid lg:grid-cols-3 gap-6">
             <div className="lg:col-span-2 bg-white rounded-2xl border border-[#E4D9C1] overflow-x-auto">
@@ -694,6 +963,10 @@ const AdminDashboard = () => {
               </form>
             )}
           </div>
+        )}
+
+        {activeTab === 'Account' && (
+          <AccountForm user={user} onUpdated={(u) => setUser(u)} />
         )}
 
         {invoiceOrder && (
@@ -768,6 +1041,13 @@ const AdminDashboard = () => {
           mode={editorMode}
           initial={editorProduct}
           onClose={() => setEditorOpen(false)}
+          onSaved={reload}
+        />
+        <FarmerEditorModal
+          open={farmerEditorOpen}
+          mode={farmerEditorMode}
+          initial={farmerEditing}
+          onClose={() => setFarmerEditorOpen(false)}
           onSaved={reload}
         />
 

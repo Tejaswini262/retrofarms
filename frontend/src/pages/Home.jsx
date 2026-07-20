@@ -23,7 +23,7 @@ const Home = () => {
         <img src="https://images.unsplash.com/photo-1508930993032-fbbaf4f2821a?auto=format&fit=crop&w=2000&q=80" alt="farm" className="absolute inset-0 w-full h-full object-cover" />
         <div className="absolute inset-0 bg-gradient-to-br from-[#F7F1E5]/85 via-[#F7F1E5]/60 to-transparent" />
         <div className="relative max-w-[1400px] mx-auto px-6 lg:px-10 py-24">
-          <div className="max-w-2xl">
+          <div className="max-w-2xl fade-up">
             <div className="text-[#C96C1B] tracking-[0.3em] text-xs mb-6">A 6-ACRE FREE-RANGE FAMILY FARM</div>
             <h1 className="font-serif text-5xl md:text-6xl lg:text-7xl text-[#2B1D11] leading-[1.05] mb-8">Honest food,<br />grown the old way.</h1>
             <p className="text-lg text-[#4B3826] leading-relaxed max-w-xl mb-10">
@@ -66,8 +66,8 @@ const Home = () => {
             <Link to="/shop" className="inline-block mt-6 text-[#C96C1B] hover:text-[#A85512] transition-colors">View entire shop →</Link>
           </div>
           <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-6">
-            {cats.map((c) => (
-              <Link key={c.id} to={`/shop?cat=${c.id}`} className="group bg-white rounded-2xl overflow-hidden shadow-sm hover:shadow-lg transition-shadow border border-[#E4D9C1]">
+            {cats.map((c, i) => (
+              <Link key={c.id} to={`/shop?cat=${c.id}`} className={`group bg-white rounded-2xl overflow-hidden shadow-sm hover-lift border border-[#E4D9C1] fade-up delay-${i + 1}`}>
                 <div className="aspect-[4/5] overflow-hidden bg-[#EFE4CB]">
                   <img src={products.find((p) => p.category === c.id)?.image} alt={c.label} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
                 </div>
@@ -107,8 +107,8 @@ const Home = () => {
             <h2 className="font-serif text-4xl md:text-5xl text-[#2B1D11]">Freshly picked, ready to order</h2>
           </div>
           <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-6">
-            {featured.map((p) => (
-              <Link key={p.slug} to={`/product/${p.slug}`} className="group bg-white rounded-2xl overflow-hidden border border-[#E4D9C1] shadow-sm hover:shadow-lg transition-shadow">
+            {featured.map((p, i) => (
+              <Link key={p.slug} to={`/product/${p.slug}`} className={`group bg-white rounded-2xl overflow-hidden border border-[#E4D9C1] shadow-sm hover-lift card-shine fade-up delay-${i + 1}`}>
                 <div className="aspect-square overflow-hidden bg-[#EFE4CB]">
                   <img src={p.image} alt={p.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
                 </div>

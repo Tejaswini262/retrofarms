@@ -37,7 +37,7 @@ const Shop = () => {
       <section className="max-w-[1400px] mx-auto px-6 lg:px-10 pb-24">
         <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-6">
           {items.map((p) => (
-            <Link key={p.slug} to={`/product/${p.slug}`} className="group bg-white rounded-2xl overflow-hidden border border-[#E4D9C1] shadow-sm hover:shadow-lg transition-shadow">
+            <Link key={p.slug} to={`/product/${p.slug}`} className="group bg-white rounded-2xl overflow-hidden border border-[#E4D9C1] shadow-sm hover-lift card-shine">
               <div className="aspect-square overflow-hidden bg-[#EFE4CB]">
                 <img src={p.image} alt={p.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
               </div>

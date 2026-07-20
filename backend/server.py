@@ -148,6 +148,8 @@ class Address(BaseModel):
     city: str
     pincode: str
     landmark: Optional[str] = ''
+    lat: Optional[float] = None
+    lng: Optional[float] = None
 
 class OrderCreatePayload(BaseModel):
     items: List[CartItem]
@@ -221,6 +223,27 @@ class VariantUpdatePayload(BaseModel):
     label: Optional[str] = None
     price: Optional[int] = None
     stock: Optional[int] = None
+
+class FarmerCreatePayload(BaseModel):
+    name: str
+    creds: str = ''
+    role: str = ''
+    photo: str = ''
+    order: int = 0
+
+class UpdateMePayload(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    current_password: Optional[str] = None
+    new_password: Optional[str] = None
+
+class FarmerUpdatePayload(BaseModel):
+    name: Optional[str] = None
+    creds: Optional[str] = None
+    role: Optional[str] = None
+    photo: Optional[str] = None
+    order: Optional[int] = None
 
 # ==================== HELPERS ====================
 
@@ -320,6 +343,30 @@ async def startup():
             'provider': 'email',
         })
 
+    # Seed farmers if none exist
+    if await db.farmers.count_documents({}) == 0:
+        seed_farmers = [
+            {
+                'farmer_id': f"farmer_{uuid.uuid4().hex[:10]}",
+                'name': 'Dr. Venkat', 'creds': 'M.Sc, Ph.D in Chemistry', 'role': 'Founder & Farm Director',
+                'photo': 'https://customer-assets-39nsmqrw.emergentagent.net/job_farm-to-table-541/artifacts/t0o5gwzu_Dr.Avudoddi.Venkat.jpeg',
+                'order': 1, 'created_at': now_utc(),
+            },
+            {
+                'farmer_id': f"farmer_{uuid.uuid4().hex[:10]}",
+                'name': 'Mr. Avudoddi Ramakrishna', 'creds': 'MBA', 'role': 'Operations & Distribution',
+                'photo': 'https://customer-assets-39nsmqrw.emergentagent.net/job_farm-to-table-541/artifacts/51ekxg06_Avudoddi.Ramakrishna.jpeg',
+                'order': 2, 'created_at': now_utc(),
+            },
+            {
+                'farmer_id': f"farmer_{uuid.uuid4().hex[:10]}",
+                'name': 'Mr. Avudoddi Mallikarjun', 'creds': 'M.Sc, Ph.D in Chemistry', 'role': 'Livestock & Nutrition Lead',
+                'photo': 'https://customer-assets-39nsmqrw.emergentagent.net/job_farm-to-table-541/artifacts/2qghb75g_Avudoddi.Mallikarjun.jpeg',
+                'order': 3, 'created_at': now_utc(),
+            },
+        ]
+        await db.farmers.insert_many(seed_farmers)
+
 @app.on_event("shutdown")
 async def shutdown():
     client.close()
@@ -416,6 +463,38 @@ async def logout(request: Request, response: Response):
         await db.sessions.delete_one({'session_token': token})
     response.delete_cookie('session_token', path='/')
     return {"ok": True}
+
+@api.patch("/auth/me")
+async def update_me(payload: UpdateMePayload, request: Request):
+    user = await require_user(request)
+    update = {}
+    if payload.name is not None:
+        update['name'] = payload.name.strip()
+    if payload.phone is not None:
+        update['phone'] = payload.phone.strip()
+    if payload.email is not None:
+        new_email = payload.email.strip().lower()
+        if new_email != user['email']:
+            existing = await db.users.find_one({'email': new_email})
+            if existing and existing.get('user_id') != user['user_id']:
+                raise HTTPException(status_code=400, detail="Email already in use")
+            update['email'] = new_email
+    if payload.new_password:
+        if len(payload.new_password) < 6:
+            raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+        # For email-authenticated accounts, require current password
+        if user.get('provider') == 'email':
+            if not payload.current_password:
+                raise HTTPException(status_code=400, detail="Current password required")
+            fresh = await db.users.find_one({'user_id': user['user_id']})
+            if not fresh or not fresh.get('password_hash') or not check_password(payload.current_password, fresh['password_hash']):
+                raise HTTPException(status_code=401, detail="Current password is incorrect")
+        update['password_hash'] = hash_password(payload.new_password)
+        update['provider'] = 'email'
+    if update:
+        await db.users.update_one({'user_id': user['user_id']}, {'$set': update})
+    doc = await db.users.find_one({'user_id': user['user_id']}, {'_id': 0, 'password_hash': 0})
+    return user_public(doc)
 
 # ==================== PRODUCT ROUTES ====================
 
@@ -837,6 +916,71 @@ async def delete_variant(slug: str, variant_id: str, _u=Depends(require_admin)):
         raise HTTPException(status_code=404, detail="Variant not found")
     await db.products.update_one({'slug': slug}, {'$set': {'variants': new_variants}})
     return {"ok": True}
+
+# ==================== FARMERS ====================
+
+@api.get("/farmers")
+async def list_farmers():
+    docs = await db.farmers.find({}, {'_id': 0}).sort('order', 1).to_list(50)
+    return docs
+
+@api.post("/admin/farmers")
+async def create_farmer(payload: FarmerCreatePayload, _u=Depends(require_admin)):
+    doc = {
+        'farmer_id': f"farmer_{uuid.uuid4().hex[:10]}",
+        'name': payload.name, 'creds': payload.creds, 'role': payload.role,
+        'photo': payload.photo, 'order': payload.order, 'created_at': now_utc(),
+    }
+    await db.farmers.insert_one(doc)
+    return {k: v for k, v in doc.items() if k != '_id'}
+
+@api.put("/admin/farmers/{farmer_id}")
+async def update_farmer(farmer_id: str, payload: FarmerUpdatePayload, _u=Depends(require_admin)):
+    update = {k: v for k, v in payload.dict().items() if v is not None}
+    r = await db.farmers.update_one({'farmer_id': farmer_id}, {'$set': update})
+    if r.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Farmer not found")
+    doc = await db.farmers.find_one({'farmer_id': farmer_id}, {'_id': 0})
+    return doc
+
+@api.delete("/admin/farmers/{farmer_id}")
+async def delete_farmer(farmer_id: str, _u=Depends(require_admin)):
+    r = await db.farmers.delete_one({'farmer_id': farmer_id})
+    if r.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"ok": True}
+
+# ==================== OFFLINE CUSTOMERS ====================
+
+@api.get("/admin/offline-customers")
+async def offline_customers(_u=Depends(require_admin_or_staff)):
+    """Returns all customers who've ordered before — for quick reuse in offline order form."""
+    users = await db.users.find({'role': 'customer'}, {'_id': 0, 'password_hash': 0}).to_list(2000)
+    orders = await db.orders.find({}, {'_id': 0, 'items': 0}).to_list(5000)
+    by_user = {}
+    for o in orders:
+        by_user.setdefault(o['user_id'], []).append(o)
+    out = []
+    for u in users:
+        u_orders = by_user.get(u['user_id'], [])
+        last_order = None
+        if u_orders:
+            last_order = max(u_orders, key=lambda x: x.get('created_at') or '')
+        out.append({
+            'user_id': u['user_id'],
+            'name': u.get('name', ''),
+            'email': u['email'],
+            'phone': u.get('phone', ''),
+            'provider': u.get('provider', ''),
+            'orders': len(u_orders),
+            'last_ordered_at': last_order.get('created_at') if last_order else None,
+            'last_address': (last_order or {}).get('address'),
+        })
+    # Sort by last_ordered_at desc (most recent first)
+    # Use datetime.min for None values to ensure proper sorting
+    from datetime import datetime as dt_min
+    out.sort(key=lambda x: (x['last_ordered_at'] or dt_min(1970, 1, 1)), reverse=True)
+    return out
 
 # ==================== APP SETUP ====================
 
