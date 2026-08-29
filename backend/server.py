@@ -1,11 +1,12 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, Cookie
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, Cookie, Query
+from fastapi.responses import JSONResponse, StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional, Dict, Any
 import os
+import io
 import uuid
 import hmac
 import hashlib
@@ -14,7 +15,10 @@ import bcrypt
 import httpx
 import razorpay
 from pathlib import Path
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.utils import get_column_letter
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -139,6 +143,7 @@ class CartItem(BaseModel):
     slug: str
     variant_id: str
     qty: int
+    options: Optional[Dict[str, Any]] = None  # For chicken: bird_type, delivery_date, instructions, piece_size
 
 class Address(BaseModel):
     full_name: str
@@ -184,6 +189,7 @@ class OfflineOrderItem(BaseModel):
     slug: str
     variant_id: str
     qty: int
+    options: Optional[Dict[str, Any]] = None
 
 class OfflineOrderPayload(BaseModel):
     customer_name: str
@@ -191,11 +197,26 @@ class OfflineOrderPayload(BaseModel):
     customer_email: Optional[str] = ''
     items: List[OfflineOrderItem]
     address: Optional[Dict[str, Any]] = None
-    payment_method: str = 'offline'  # offline / cash / upi / bank
+    payment_method: str = 'offline'  # offline / cash / upi / bank / not_paid / cod
     payment_status: str = 'Paid'
     notes: Optional[str] = ''
     status: str = 'Placed'
-    total_override: Optional[int] = None  # if provided, use this as total (delivery=0)
+    total_override: Optional[int] = None
+    save_customer_address: bool = True  # save address to customer profile for reuse
+
+class CategoryPayload(BaseModel):
+    id: str
+    label: str
+
+class CategoryUpdatePayload(BaseModel):
+    label: Optional[str] = None
+    order: Optional[int] = None
+
+class CustomerUpdatePayload(BaseModel):
+    name: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    address: Optional[Dict[str, Any]] = None
 
 class VariantInput(BaseModel):
     id: str
@@ -312,10 +333,40 @@ def user_public(u: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.on_event("startup")
 async def startup():
+    # DB indexes for performance
+    try:
+        await db.users.create_index('email', unique=True)
+        await db.users.create_index('phone')
+        await db.users.create_index('role')
+        await db.users.create_index('user_id', unique=True)
+        await db.orders.create_index('order_id', unique=True)
+        await db.orders.create_index('user_id')
+        await db.orders.create_index([('created_at', -1)])
+        await db.orders.create_index('status')
+        await db.orders.create_index('payment_status')
+        await db.sessions.create_index('session_token', unique=True)
+        await db.sessions.create_index('expires_at')
+        await db.products.create_index('slug', unique=True)
+        await db.products.create_index('category')
+        await db.farmers.create_index('farmer_id', unique=True)
+        await db.categories.create_index('id', unique=True)
+    except Exception as e:
+        logging.warning(f"Index creation warning: {e}")
+
     # Seed products if empty
     if await db.products.count_documents({}) == 0:
         await db.products.insert_many([{**p} for p in SEED_PRODUCTS])
         logging.info("Seeded products")
+
+    # Seed categories if empty
+    if await db.categories.count_documents({}) == 0:
+        default_cats = [
+            {'id': 'eggs', 'label': 'Country Eggs', 'order': 1},
+            {'id': 'chicken', 'label': 'Country Chicken', 'order': 2},
+            {'id': 'fruits', 'label': 'Farm Fruits', 'order': 3},
+            {'id': 'vegetables', 'label': 'Fresh Vegetables', 'order': 4},
+        ]
+        await db.categories.insert_many(default_cats)
 
     # Seed admin/staff users if not exist
     admin_email = os.environ['ADMIN_EMAIL']
@@ -531,7 +582,7 @@ def calc_totals(items_resolved):
     total = subtotal + delivery
     return subtotal, delivery, total
 
-async def resolve_items(items: List[CartItem]):
+async def resolve_items(items):
     resolved = []
     for it in items:
         p = await db.products.find_one({'slug': it.slug}, {'_id': 0})
@@ -540,11 +591,15 @@ async def resolve_items(items: List[CartItem]):
         variant = next((v for v in p['variants'] if v['id'] == it.variant_id), None)
         if not variant:
             raise HTTPException(status_code=400, detail=f"Variant {it.variant_id} not found")
-        resolved.append({
+        entry = {
             'slug': p['slug'], 'name': p['name'], 'image': p['image'],
             'variant_id': variant['id'], 'variant_label': variant['label'],
             'price': variant['price'], 'qty': it.qty,
-        })
+        }
+        opts = getattr(it, 'options', None)
+        if opts:
+            entry['options'] = opts
+        resolved.append(entry)
     return resolved
 
 @api.post("/orders/create")
@@ -785,48 +840,54 @@ async def admin_staff_delete(user_id: str, current=Depends(require_admin)):
 async def create_offline_order(payload: OfflineOrderPayload, current=Depends(require_admin_or_staff)):
     if not payload.items:
         raise HTTPException(status_code=400, detail="Items required")
-    items = []
-    for it in payload.items:
-        p = await db.products.find_one({'slug': it.slug}, {'_id': 0})
-        if not p:
-            raise HTTPException(status_code=400, detail=f"Product {it.slug} not found")
-        variant = next((v for v in p['variants'] if v['id'] == it.variant_id), None)
-        if not variant:
-            raise HTTPException(status_code=400, detail=f"Variant {it.variant_id} not found")
-        items.append({
-            'slug': p['slug'], 'name': p['name'], 'image': p['image'],
-            'variant_id': variant['id'], 'variant_label': variant['label'],
-            'price': variant['price'], 'qty': it.qty,
-        })
+    items = await resolve_items(payload.items)
     subtotal, delivery, total = calc_totals(items)
     if payload.total_override is not None and payload.total_override >= 0:
         total = int(payload.total_override)
-        # store discount/adjustment as delta from subtotal
         delivery = max(0, total - subtotal)
 
-    # Find or create pseudo customer user
+    # Find or create pseudo customer user — prefer by phone (unique identifier for offline)
     email = (payload.customer_email or '').lower().strip()
+    phone = (payload.customer_phone or '').strip()
+    existing = None
+    if phone:
+        existing = await db.users.find_one({'phone': phone, 'role': 'customer'})
+    if not existing and email:
+        existing = await db.users.find_one({'email': email})
     if not email:
-        # generate synthetic email for offline customer using phone
-        email = f"offline_{payload.customer_phone or uuid.uuid4().hex[:8]}@retrofarms.offline"
-    existing = await db.users.find_one({'email': email})
+        email = f"offline_{phone or uuid.uuid4().hex[:8]}@retrofarms.offline"
+
+    address_to_save = payload.address or None
+
     if existing:
         cust_id = existing['user_id']
-        await db.users.update_one({'user_id': cust_id}, {'$set': {
+        update = {
             'name': payload.customer_name or existing.get('name', ''),
-            'phone': payload.customer_phone or existing.get('phone', ''),
-        }})
+            'phone': phone or existing.get('phone', ''),
+        }
+        if email and email != existing.get('email'):
+            # only update email if it's a real one, not a synthetic offline
+            if not existing.get('email', '').endswith('@retrofarms.offline'):
+                pass  # keep original real email
+            else:
+                update['email'] = email
+        if payload.save_customer_address and address_to_save:
+            update['saved_address'] = address_to_save
+        await db.users.update_one({'user_id': cust_id}, {'$set': update})
     else:
         cust_id = f"user_{uuid.uuid4().hex[:12]}"
-        await db.users.insert_one({
+        doc = {
             'user_id': cust_id,
             'email': email,
             'name': payload.customer_name,
-            'phone': payload.customer_phone,
+            'phone': phone,
             'role': 'customer',
             'provider': 'offline',
             'created_at': now_utc(),
-        })
+        }
+        if payload.save_customer_address and address_to_save:
+            doc['saved_address'] = address_to_save
+        await db.users.insert_one(doc)
 
     order_id = uuid.uuid4().hex[:8]
     order_doc = {
@@ -834,7 +895,7 @@ async def create_offline_order(payload: OfflineOrderPayload, current=Depends(req
         'user_id': cust_id,
         'customer_email': email,
         'customer_name': payload.customer_name,
-        'address': payload.address or {'full_name': payload.customer_name, 'phone': payload.customer_phone,
+        'address': payload.address or {'full_name': payload.customer_name, 'phone': phone,
                                         'line1': 'Offline order', 'city': 'Hyderabad', 'pincode': '', 'landmark': ''},
         'items': items,
         'subtotal': subtotal,
@@ -853,6 +914,36 @@ async def create_offline_order(payload: OfflineOrderPayload, current=Depends(req
     await db.orders.insert_one(order_doc)
     await decrement_stock(items)
     doc = await db.orders.find_one({'order_id': order_id}, {'_id': 0})
+    return doc
+
+# Lookup a customer by phone (for offline order autofill)
+@api.get("/admin/customers/lookup")
+async def lookup_customer(phone: str = Query(...), _u=Depends(require_admin_or_staff)):
+    u = await db.users.find_one({'phone': phone, 'role': 'customer'},
+                                 {'_id': 0, 'user_id': 1, 'name': 1, 'email': 1, 'phone': 1, 'saved_address': 1})
+    return u or {}
+
+# Update a customer's profile fields (no impact on past orders)
+@api.patch("/admin/customers/{user_id}")
+async def update_customer(user_id: str, payload: CustomerUpdatePayload, _u=Depends(require_admin_or_staff)):
+    update = {}
+    if payload.name is not None: update['name'] = payload.name.strip()
+    if payload.phone is not None: update['phone'] = payload.phone.strip()
+    if payload.email is not None:
+        new_email = payload.email.strip().lower()
+        if new_email:
+            existing = await db.users.find_one({'email': new_email})
+            if existing and existing.get('user_id') != user_id:
+                raise HTTPException(status_code=400, detail="Email already in use")
+            update['email'] = new_email
+    if payload.address is not None:
+        update['saved_address'] = payload.address
+    if update:
+        r = await db.users.update_one({'user_id': user_id, 'role': 'customer'}, {'$set': update})
+        if r.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Customer not found")
+    doc = await db.users.find_one({'user_id': user_id},
+                                    {'_id': 0, 'user_id': 1, 'name': 1, 'email': 1, 'phone': 1, 'saved_address': 1})
     return doc
 
 # ==================== PRODUCT CRUD ====================
@@ -1003,6 +1094,201 @@ async def offline_customers(limit: int = 500, _u=Depends(require_admin_or_staff)
         })
     out.sort(key=lambda x: (x['last_ordered_at'] or dt_min(1970, 1, 1)), reverse=True)
     return out
+
+# ==================== CATEGORIES ====================
+
+@api.get("/categories")
+async def list_categories():
+    docs = await db.categories.find({}, {'_id': 0}).sort('order', 1).to_list(100)
+    return docs
+
+@api.post("/admin/categories")
+async def create_category(payload: CategoryPayload, _u=Depends(require_admin)):
+    cid = payload.id.strip().lower().replace(' ', '-')
+    if not cid or not payload.label:
+        raise HTTPException(status_code=400, detail="id and label required")
+    if await db.categories.find_one({'id': cid}):
+        raise HTTPException(status_code=400, detail="Category id already exists")
+    max_order = 0
+    async for c in db.categories.find({}, {'order': 1}).sort('order', -1).limit(1):
+        max_order = c.get('order', 0)
+    doc = {'id': cid, 'label': payload.label.strip(), 'order': max_order + 1}
+    await db.categories.insert_one(doc)
+    doc.pop('_id', None)
+    return doc
+
+@api.patch("/admin/categories/{cid}")
+async def update_category(cid: str, payload: CategoryUpdatePayload, _u=Depends(require_admin)):
+    update = {k: v for k, v in payload.dict().items() if v is not None}
+    r = await db.categories.update_one({'id': cid}, {'$set': update})
+    if r.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Not found")
+    doc = await db.categories.find_one({'id': cid}, {'_id': 0})
+    return doc
+
+@api.delete("/admin/categories/{cid}")
+async def delete_category(cid: str, reassign_to: Optional[str] = Query(None), _u=Depends(require_admin)):
+    in_use = await db.products.count_documents({'category': cid})
+    if in_use > 0 and not reassign_to:
+        raise HTTPException(status_code=400,
+                            detail=f"{in_use} product(s) still use this category. Reassign first via ?reassign_to=<other_id>")
+    if reassign_to:
+        if not await db.categories.find_one({'id': reassign_to}):
+            raise HTTPException(status_code=400, detail="Target category not found")
+        await db.products.update_many({'category': cid}, {'$set': {'category': reassign_to}})
+    r = await db.categories.delete_one({'id': cid})
+    if r.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"ok": True, "reassigned": in_use if reassign_to else 0}
+
+# ==================== REVENUE BREAKDOWN ====================
+
+@api.get("/admin/revenue/breakdown")
+async def revenue_breakdown(view: str = Query('day', regex='^(day|week|month|year)$'),
+                             start: Optional[str] = None, end: Optional[str] = None,
+                             _u=Depends(require_admin_or_staff)):
+    """Returns revenue grouped by day/week/month/year for paid orders."""
+    match = {'payment_status': 'Paid'}
+    if start or end:
+        rng = {}
+        if start:
+            try: rng['$gte'] = datetime.fromisoformat(start)
+            except ValueError: pass
+        if end:
+            try: rng['$lte'] = datetime.fromisoformat(end)
+            except ValueError: pass
+        if rng: match['created_at'] = rng
+
+    fmt_map = {
+        'day': '%Y-%m-%d',
+        'week': '%G-W%V',   # ISO week
+        'month': '%Y-%m',
+        'year': '%Y',
+    }
+    date_fmt = fmt_map[view]
+    pipe = [
+        {'$match': match},
+        {'$group': {
+            '_id': {'$dateToString': {'format': date_fmt, 'date': '$created_at'}},
+            'revenue': {'$sum': '$total'},
+            'orders': {'$sum': 1},
+        }},
+        {'$sort': {'_id': 1}},
+    ]
+    rows = []
+    async for r in db.orders.aggregate(pipe):
+        avg = round(r['revenue'] / r['orders'], 2) if r['orders'] else 0
+        rows.append({'period': r['_id'], 'revenue': r['revenue'], 'orders': r['orders'], 'aov': avg})
+    total_rev = sum(r['revenue'] for r in rows)
+    total_orders = sum(r['orders'] for r in rows)
+    return {
+        'view': view,
+        'rows': rows,
+        'summary': {
+            'total_revenue': total_rev,
+            'total_orders': total_orders,
+            'aov': round(total_rev / total_orders, 2) if total_orders else 0,
+        },
+    }
+
+# ==================== EXCEL EXPORT ====================
+
+def _flatten_options(opts):
+    if not opts: return ''
+    if isinstance(opts, dict):
+        return ' | '.join(f"{k}: {v}" for k, v in opts.items() if v)
+    return str(opts)
+
+@api.get("/admin/orders/export.xlsx")
+async def export_orders_xlsx(start: Optional[str] = None, end: Optional[str] = None,
+                              status: Optional[str] = None, _u=Depends(require_admin_or_staff)):
+    query = {}
+    if start or end:
+        rng = {}
+        if start:
+            try: rng['$gte'] = datetime.fromisoformat(start)
+            except ValueError: pass
+        if end:
+            try: rng['$lte'] = datetime.fromisoformat(end)
+            except ValueError: pass
+        if rng: query['created_at'] = rng
+    if status: query['status'] = status
+
+    orders = await db.orders.find(query, {'_id': 0}).sort('created_at', -1).to_list(20000)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Orders'
+    headers = ['Order ID', 'Date', 'Customer Name', 'Phone', 'Email', 'Address',
+               'Items', 'Chicken Details', 'Payment Method', 'Payment Status',
+               'Subtotal', 'Delivery', 'Total', 'Status', 'Assigned To', 'Source', 'Notes']
+    ws.append(headers)
+    header_font = Font(bold=True, color='FFFFFF')
+    header_fill = PatternFill('solid', fgColor='2B1D11')
+    for col_idx, _ in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal='left', vertical='center')
+
+    for o in orders:
+        addr = o.get('address') or {}
+        addr_str = ', '.join([str(v) for v in [addr.get('line1'), addr.get('line2'), addr.get('city'),
+                              addr.get('pincode'), addr.get('landmark')] if v])
+        items_str = '; '.join([f"{i.get('name')} ({i.get('variant_label')}) × {i.get('qty')}" for i in o.get('items', [])])
+        chicken_details = []
+        for i in o.get('items', []):
+            opts = i.get('options')
+            if opts:
+                chicken_details.append(f"{i.get('name')}: {_flatten_options(opts)}")
+        created = o.get('created_at')
+        if isinstance(created, str):
+            try: created = datetime.fromisoformat(created.replace('Z', '+00:00'))
+            except Exception: created = None
+        row = [
+            o.get('order_id', ''),
+            created if isinstance(created, datetime) else '',
+            o.get('customer_name') or addr.get('full_name', ''),
+            addr.get('phone') or '',
+            o.get('customer_email', ''),
+            addr_str,
+            items_str,
+            ' | '.join(chicken_details),
+            (o.get('payment_method') or '').upper(),
+            o.get('payment_status', ''),
+            o.get('subtotal', 0),
+            o.get('delivery_charge', 0),
+            o.get('total', 0),
+            o.get('status', ''),
+            o.get('assigned_staff_name') or 'Unassigned',
+            o.get('source') or 'online',
+            o.get('notes', ''),
+        ]
+        ws.append(row)
+
+    # Format date column
+    for cell in ws['B'][1:]:
+        cell.number_format = 'yyyy-mm-dd hh:mm'
+    for col in ['K', 'L', 'M']:  # money columns
+        for cell in ws[col][1:]:
+            cell.number_format = '"₹"#,##0'
+
+    # Sensible widths
+    widths = [12, 20, 22, 14, 26, 40, 50, 30, 14, 14, 10, 10, 10, 14, 18, 10, 30]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+    ws.freeze_panes = 'A2'
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    fname = f"retrofarms_orders_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers={'Content-Disposition': f'attachment; filename="{fname}"'},
+    )
 
 # ==================== APP SETUP ====================
 

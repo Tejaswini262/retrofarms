@@ -29,6 +29,14 @@ const Cart = () => {
                 <div className="flex-1">
                   <div className="font-serif text-lg text-[#2B1D11]">{c.name}</div>
                   <div className="text-sm text-[#7A6A55]">{c.variantLabel}</div>
+                  {c.options && (
+                    <div className="text-xs text-[#4E6A3C] mt-1 space-y-0.5">
+                      {c.options.bird_type && <div>Bird: {c.options.bird_type}</div>}
+                      {c.options.piece_size && <div>Cut: {c.options.piece_size}</div>}
+                      {c.options.delivery_date && <div>Delivery: {c.options.delivery_date}</div>}
+                      {c.options.instructions && <div>Notes: {c.options.instructions}</div>}
+                    </div>
+                  )}
                   <div className="text-[#4B3826] mt-1">₹{c.price} each</div>
                 </div>
                 <div className="flex items-center gap-2 border border-[#E4D9C1] rounded-full p-1">

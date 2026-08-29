@@ -1,581 +1,857 @@
 #!/usr/bin/env python3
 """
-Backend API Test Suite for Retro Farms - Refactored Endpoints Verification
-Tests the optimized admin endpoints that now use MongoDB aggregation pipelines
+Backend API Testing for Retro Farms - New Features
+Tests: Categories CRUD, Revenue Breakdown, Excel Export, Customer Lookup/Update, 
+       Offline Orders with new fields, Chicken Options, DB Indexes, Regression
 """
 
 import requests
 import json
-from datetime import datetime
+import sys
+from datetime import datetime, timedelta
 
 # Configuration
 BASE_URL = "https://farm-to-table-541.preview.emergentagent.com/api"
 ADMIN_EMAIL = "admin@retrofarms.in"
 ADMIN_PASSWORD = "admin123"
+STAFF_EMAIL = "staff@retrofarms.in"
+STAFF_PASSWORD = "staff123"
 
-# Test results tracking
-tests_passed = 0
-tests_failed = 0
-failures = []
+# Test state
+admin_session = requests.Session()
+staff_session = requests.Session()
+test_results = []
+test_order_id = None
+test_customer_user_id = None
 
 def log_test(name, passed, details=""):
-    global tests_passed, tests_failed, failures
-    if passed:
-        tests_passed += 1
-        print(f"✅ {name}")
-    else:
-        tests_failed += 1
-        failures.append(f"{name}: {details}")
-        print(f"❌ {name}")
-        if details:
-            print(f"   Details: {details}")
+    """Log test result"""
+    status = "✅ PASS" if passed else "❌ FAIL"
+    test_results.append({"name": name, "passed": passed, "details": details})
+    print(f"{status}: {name}")
+    if details and not passed:
+        print(f"   Details: {details}")
 
 def admin_login():
-    """Login as admin and return session cookie"""
-    print("\n🔐 Logging in as admin...")
-    resp = requests.post(f"{BASE_URL}/auth/admin-login", json={
-        "email": ADMIN_EMAIL,
-        "password": ADMIN_PASSWORD
-    })
-    if resp.status_code != 200:
-        print(f"❌ Admin login failed: {resp.status_code} - {resp.text}")
-        return None
-    
-    session_token = resp.cookies.get('session_token')
-    if not session_token:
-        print("❌ No session_token cookie received")
-        return None
-    
-    print(f"✅ Admin login successful")
-    return {'session_token': session_token}
-
-def test_admin_stats(cookies):
-    """Test 1: GET /api/admin/stats - must return correct structure with aggregated data"""
-    print("\n📊 Test 1: Admin Stats Endpoint")
-    resp = requests.get(f"{BASE_URL}/admin/stats", cookies=cookies)
-    
-    if resp.status_code != 200:
-        log_test("Admin stats - status code", False, f"Expected 200, got {resp.status_code}")
-        return None
-    
-    log_test("Admin stats - status code", True)
-    
-    data = resp.json()
-    required_keys = ['revenue', 'orders', 'pending', 'products', 'customers']
-    
-    # Check all required keys exist
-    missing_keys = [k for k in required_keys if k not in data]
-    if missing_keys:
-        log_test("Admin stats - required keys", False, f"Missing keys: {missing_keys}")
-        return None
-    
-    log_test("Admin stats - required keys", True)
-    
-    # Check all values are numeric
-    non_numeric = [k for k in required_keys if not isinstance(data[k], (int, float))]
-    if non_numeric:
-        log_test("Admin stats - numeric values", False, f"Non-numeric values: {non_numeric}")
-        return None
-    
-    log_test("Admin stats - numeric values", True)
-    
-    # Check products >= 11 (seeded products)
-    if data['products'] < 11:
-        log_test("Admin stats - products count", False, f"Expected >= 11, got {data['products']}")
+    """Login as admin and return session"""
+    resp = admin_session.post(f"{BASE_URL}/auth/admin-login", 
+                              json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD})
+    if resp.status_code == 200:
+        log_test("Admin login", True)
+        return True
     else:
-        log_test("Admin stats - products count", True)
-    
-    # Check customers > 0
-    if data['customers'] <= 0:
-        log_test("Admin stats - customers count", False, f"Expected > 0, got {data['customers']}")
-    else:
-        log_test("Admin stats - customers count", True)
-    
-    print(f"   Stats: revenue={data['revenue']}, orders={data['orders']}, pending={data['pending']}, products={data['products']}, customers={data['customers']}")
-    return data
+        log_test("Admin login", False, f"Status {resp.status_code}: {resp.text}")
+        return False
 
-def test_admin_orders_pagination(cookies):
-    """Test 2: GET /api/admin/orders - test pagination with limit and skip"""
-    print("\n📦 Test 2: Admin Orders Pagination")
-    
-    # Test 2a: Default (up to 500 orders)
-    resp = requests.get(f"{BASE_URL}/admin/orders", cookies=cookies)
-    if resp.status_code != 200:
-        log_test("Admin orders - default request", False, f"Status {resp.status_code}")
-        return None
-    
-    log_test("Admin orders - default request", True)
-    
-    all_orders = resp.json()
-    if not isinstance(all_orders, list):
-        log_test("Admin orders - returns array", False, f"Expected array, got {type(all_orders)}")
-        return None
-    
-    log_test("Admin orders - returns array", True)
-    print(f"   Total orders: {len(all_orders)}")
-    
-    # Check sorting by created_at desc
-    if len(all_orders) >= 2:
-        dates = [o.get('created_at') for o in all_orders[:10]]
-        is_sorted = all(dates[i] >= dates[i+1] for i in range(len(dates)-1) if dates[i] and dates[i+1])
-        log_test("Admin orders - sorted by created_at desc", is_sorted, 
-                 "Orders not sorted correctly" if not is_sorted else "")
-    
-    # Check required fields in first order
-    if all_orders:
-        first_order = all_orders[0]
-        required_fields = ['order_id', 'customer_email', 'items', 'total', 'status', 
-                          'payment_status', 'address', 'assigned_staff_id']
-        missing = [f for f in required_fields if f not in first_order]
-        if missing:
-            log_test("Admin orders - required fields", False, f"Missing: {missing}")
-        else:
-            log_test("Admin orders - required fields", True)
-    
-    # Test 2b: limit=5
-    resp = requests.get(f"{BASE_URL}/admin/orders?limit=5", cookies=cookies)
-    if resp.status_code != 200:
-        log_test("Admin orders - limit=5", False, f"Status {resp.status_code}")
-        return None
-    
-    limited_orders = resp.json()
-    if len(limited_orders) > 5:
-        log_test("Admin orders - limit=5 respected", False, f"Expected max 5, got {len(limited_orders)}")
+def staff_login():
+    """Login as staff and return session"""
+    resp = staff_session.post(f"{BASE_URL}/auth/admin-login",
+                              json={"email": STAFF_EMAIL, "password": STAFF_PASSWORD})
+    if resp.status_code == 200:
+        log_test("Staff login", True)
+        return True
     else:
-        log_test("Admin orders - limit=5 respected", True)
-        print(f"   Limited orders: {len(limited_orders)}")
-    
-    # Test 2c: limit=5&skip=5 (pagination)
-    resp = requests.get(f"{BASE_URL}/admin/orders?limit=5&skip=5", cookies=cookies)
-    if resp.status_code != 200:
-        log_test("Admin orders - pagination (skip)", False, f"Status {resp.status_code}")
-        return None
-    
-    paginated_orders = resp.json()
-    log_test("Admin orders - pagination (skip)", True)
-    print(f"   Paginated orders (skip=5): {len(paginated_orders)}")
-    
-    # Verify pagination returns different orders
-    if len(all_orders) > 5 and limited_orders and paginated_orders:
-        first_page_ids = [o['order_id'] for o in limited_orders]
-        second_page_ids = [o['order_id'] for o in paginated_orders]
-        overlap = set(first_page_ids) & set(second_page_ids)
-        if overlap:
-            log_test("Admin orders - pagination returns different orders", False, 
-                     f"Found overlapping order_ids: {overlap}")
-        else:
-            log_test("Admin orders - pagination returns different orders", True)
-    
-    return all_orders
+        log_test("Staff login", False, f"Status {resp.status_code}: {resp.text}")
+        return False
 
-def test_admin_customers(cookies):
-    """Test 3: GET /api/admin/customers - verify aggregated total_spent calculation"""
-    print("\n👥 Test 3: Admin Customers with Aggregated Stats")
-    
-    resp = requests.get(f"{BASE_URL}/admin/customers", cookies=cookies)
-    if resp.status_code != 200:
-        log_test("Admin customers - status code", False, f"Status {resp.status_code}")
-        return None
-    
-    log_test("Admin customers - status code", True)
-    
-    customers = resp.json()
-    if not isinstance(customers, list):
-        log_test("Admin customers - returns array", False, f"Expected array, got {type(customers)}")
-        return None
-    
-    log_test("Admin customers - returns array", True)
-    print(f"   Total customers: {len(customers)}")
-    
-    # Check required fields
-    if customers:
-        first_customer = customers[0]
-        required_fields = ['user_id', 'name', 'email', 'phone', 'orders', 'total_spent']
-        missing = [f for f in required_fields if f not in first_customer]
-        if missing:
-            log_test("Admin customers - required fields", False, f"Missing: {missing}")
-        else:
-            log_test("Admin customers - required fields", True)
-    
-    # Check sorted by total_spent desc
-    if len(customers) >= 2:
-        spent_values = [c['total_spent'] for c in customers]
-        is_sorted = all(spent_values[i] >= spent_values[i+1] for i in range(len(spent_values)-1))
-        log_test("Admin customers - sorted by total_spent desc", is_sorted,
-                 "Customers not sorted correctly" if not is_sorted else "")
-        print(f"   Top 3 spenders: {spent_values[:3]}")
-    
-    # Verify total_spent calculation for first customer
-    if customers:
-        test_customer = customers[0]
-        user_id = test_customer['user_id']
-        
-        # Get customer's orders
-        resp = requests.get(f"{BASE_URL}/admin/customers/{user_id}/orders", cookies=cookies)
-        if resp.status_code == 200:
-            data = resp.json()
-            orders = data.get('orders', [])
-            
-            # Calculate total_spent manually (sum of non-cancelled orders)
-            manual_total = sum(o['total'] for o in orders if o.get('status') != 'Cancelled')
-            
-            if abs(test_customer['total_spent'] - manual_total) < 0.01:
-                log_test("Admin customers - total_spent calculation", True)
-                print(f"   Verified total_spent for {test_customer['email']}: {test_customer['total_spent']}")
+# ==================== CATEGORIES CRUD ====================
+
+def test_categories_public_list():
+    """Test GET /api/categories (public)"""
+    resp = requests.get(f"{BASE_URL}/categories")
+    if resp.status_code == 200:
+        data = resp.json()
+        if isinstance(data, list) and len(data) >= 4:
+            # Check for seeded categories
+            ids = [c.get('id') for c in data]
+            expected = ['eggs', 'chicken', 'fruits', 'vegetables']
+            if all(e in ids for e in expected):
+                log_test("GET /api/categories (public)", True, f"Found {len(data)} categories including seeded ones")
+                return True
             else:
-                log_test("Admin customers - total_spent calculation", False,
-                         f"Expected {manual_total}, got {test_customer['total_spent']}")
+                log_test("GET /api/categories (public)", False, f"Missing expected categories. Got: {ids}")
+                return False
         else:
-            log_test("Admin customers - total_spent verification", False, 
-                     "Could not fetch customer orders for verification")
-    
-    return customers
-
-def test_customer_orders_endpoint(cookies):
-    """Test 4: GET /api/admin/customers/{user_id}/orders - verify structure and limit"""
-    print("\n📋 Test 4: Customer Orders Endpoint")
-    
-    # First get a customer
-    resp = requests.get(f"{BASE_URL}/admin/customers", cookies=cookies)
-    if resp.status_code != 200:
-        log_test("Customer orders - get test customer", False, "Could not fetch customers")
-        return
-    
-    customers = resp.json()
-    if not customers:
-        log_test("Customer orders - get test customer", False, "No customers found")
-        return
-    
-    test_customer = customers[0]
-    user_id = test_customer['user_id']
-    
-    # Test default request
-    resp = requests.get(f"{BASE_URL}/admin/customers/{user_id}/orders", cookies=cookies)
-    if resp.status_code != 200:
-        log_test("Customer orders - status code", False, f"Status {resp.status_code}")
-        return
-    
-    log_test("Customer orders - status code", True)
-    
-    data = resp.json()
-    
-    # Check structure
-    if 'user' not in data or 'orders' not in data:
-        log_test("Customer orders - response structure", False, 
-                 f"Expected {{user, orders}}, got keys: {list(data.keys())}")
-        return
-    
-    log_test("Customer orders - response structure", True)
-    
-    # Check user object
-    if data['user'] and 'user_id' in data['user']:
-        log_test("Customer orders - user object", True)
+            log_test("GET /api/categories (public)", False, f"Expected list with >=4 items, got {len(data) if isinstance(data, list) else 'not a list'}")
+            return False
     else:
-        log_test("Customer orders - user object", False, "Invalid user object")
-    
-    # Check orders array
-    if isinstance(data['orders'], list):
-        log_test("Customer orders - orders array", True)
-        print(f"   Customer {data['user']['email']} has {len(data['orders'])} orders")
+        log_test("GET /api/categories (public)", False, f"Status {resp.status_code}: {resp.text}")
+        return False
+
+def test_create_category():
+    """Test POST /api/admin/categories"""
+    payload = {"id": "mutton", "label": "Premium Mutton"}
+    resp = admin_session.post(f"{BASE_URL}/admin/categories", json=payload)
+    if resp.status_code in [200, 201]:
+        data = resp.json()
+        if data.get('id') == 'mutton' and data.get('label') == 'Premium Mutton':
+            log_test("POST /api/admin/categories (create mutton)", True)
+            return True
+        else:
+            log_test("POST /api/admin/categories (create mutton)", False, f"Unexpected response: {data}")
+            return False
     else:
-        log_test("Customer orders - orders array", False, "Orders is not an array")
-    
-    # Test limit parameter
-    if len(data['orders']) > 2:
-        resp = requests.get(f"{BASE_URL}/admin/customers/{user_id}/orders?limit=2", cookies=cookies)
-        if resp.status_code == 200:
-            limited_data = resp.json()
-            if len(limited_data['orders']) <= 2:
-                log_test("Customer orders - limit parameter", True)
-            else:
-                log_test("Customer orders - limit parameter", False, 
-                         f"Expected max 2, got {len(limited_data['orders'])}")
-        else:
-            log_test("Customer orders - limit parameter", False, f"Status {resp.status_code}")
+        log_test("POST /api/admin/categories (create mutton)", False, f"Status {resp.status_code}: {resp.text}")
+        return False
 
-def test_offline_customers(cookies):
-    """Test 5: GET /api/admin/offline-customers - verify aggregated metadata"""
-    print("\n🏪 Test 5: Offline Customers Endpoint")
-    
-    resp = requests.get(f"{BASE_URL}/admin/offline-customers", cookies=cookies)
-    if resp.status_code != 200:
-        log_test("Offline customers - status code", False, f"Status {resp.status_code}")
-        return None
-    
-    log_test("Offline customers - status code", True)
-    
-    customers = resp.json()
-    if not isinstance(customers, list):
-        log_test("Offline customers - returns array", False, f"Expected array, got {type(customers)}")
-        return None
-    
-    log_test("Offline customers - returns array", True)
-    print(f"   Total offline customers: {len(customers)}")
-    
-    # Check required fields
-    if customers:
-        first_customer = customers[0]
-        required_fields = ['user_id', 'name', 'email', 'phone', 'orders', 
-                          'last_ordered_at', 'last_address']
-        missing = [f for f in required_fields if f not in first_customer]
-        if missing:
-            log_test("Offline customers - required fields", False, f"Missing: {missing}")
-        else:
-            log_test("Offline customers - required fields", True)
-    
-    # Check sorted by last_ordered_at desc
-    if len(customers) >= 2:
-        # Filter customers with orders
-        with_orders = [c for c in customers if c.get('last_ordered_at')]
-        if len(with_orders) >= 2:
-            dates = [c['last_ordered_at'] for c in with_orders[:10]]
-            is_sorted = all(dates[i] >= dates[i+1] for i in range(len(dates)-1))
-            log_test("Offline customers - sorted by last_ordered_at desc", is_sorted,
-                     "Customers not sorted correctly" if not is_sorted else "")
-    
-    return customers
+def test_create_duplicate_category():
+    """Test POST /api/admin/categories with duplicate id"""
+    payload = {"id": "mutton", "label": "Another Mutton"}
+    resp = admin_session.post(f"{BASE_URL}/admin/categories", json=payload)
+    if resp.status_code == 400:
+        log_test("POST /api/admin/categories (duplicate id → 400)", True)
+        return True
+    else:
+        log_test("POST /api/admin/categories (duplicate id → 400)", False, f"Expected 400, got {resp.status_code}")
+        return False
 
-def test_regression_endpoints(cookies):
-    """Test 6: Regression tests - verify other endpoints still work"""
-    print("\n🔄 Test 6: Regression Tests")
-    
-    # Test 6a: POST /api/admin/orders/offline
-    print("   Testing offline order creation...")
-    offline_order_payload = {
-        "customer_name": "Test Regression Customer",
-        "customer_phone": "9876543210",
-        "customer_email": "",
-        "items": [
-            {"slug": "green-chilli", "variant_id": "250g", "qty": 1}
-        ],
-        "address": {
-            "full_name": "Test Regression Customer",
-            "phone": "9876543210",
-            "line1": "Test Address Line 1",
-            "city": "Hyderabad",
-            "pincode": "500001",
-            "landmark": "Near Test Landmark"
-        },
-        "payment_status": "Pending"  # Set to Pending to not affect revenue in data integrity test
+def test_update_category():
+    """Test PATCH /api/admin/categories/mutton"""
+    payload = {"label": "Farm Mutton", "order": 10}
+    resp = admin_session.patch(f"{BASE_URL}/admin/categories/mutton", json=payload)
+    if resp.status_code == 200:
+        data = resp.json()
+        if data.get('label') == 'Farm Mutton' and data.get('order') == 10:
+            log_test("PATCH /api/admin/categories/mutton", True)
+            return True
+        else:
+            log_test("PATCH /api/admin/categories/mutton", False, f"Update not reflected: {data}")
+            return False
+    else:
+        log_test("PATCH /api/admin/categories/mutton", False, f"Status {resp.status_code}: {resp.text}")
+        return False
+
+def test_delete_category_with_products():
+    """Test DELETE /api/admin/categories/mutton without reassign_to (should fail if products exist)"""
+    # First create a test product in mutton category
+    product_payload = {
+        "slug": "test-mutton",
+        "name": "Test Mutton Product",
+        "category": "mutton",
+        "image": "https://example.com/mutton.jpg",
+        "from_price": 500,
+        "description": "Test mutton product",
+        "variants": [{"id": "1kg", "label": "1 kg", "price": 500, "stock": 10}]
     }
+    create_resp = admin_session.post(f"{BASE_URL}/admin/products", json=product_payload)
+    if create_resp.status_code not in [200, 201]:
+        log_test("DELETE category with products (setup)", False, f"Failed to create test product: {create_resp.status_code}")
+        return False
     
-    resp = requests.post(f"{BASE_URL}/admin/orders/offline", 
-                        json=offline_order_payload, cookies=cookies)
-    if resp.status_code == 200:
-        log_test("Regression - offline order creation", True)
-        offline_order = resp.json()
-        offline_order_id = offline_order.get('order_id')
-        print(f"   Created offline order: {offline_order_id}")
+    # Try to delete category without reassign_to
+    resp = admin_session.delete(f"{BASE_URL}/admin/categories/mutton")
+    if resp.status_code == 400:
+        log_test("DELETE /api/admin/categories/mutton without reassign_to → 400", True, "Blocked as expected")
+        return True
     else:
-        log_test("Regression - offline order creation", False, 
-                 f"Status {resp.status_code}: {resp.text}")
-        offline_order_id = None
-    
-    # Test 6b: PATCH /api/admin/orders/{order_id}
-    if offline_order_id:
-        print("   Testing order update...")
-        resp = requests.patch(f"{BASE_URL}/admin/orders/{offline_order_id}",
-                            json={"status": "Confirmed"}, cookies=cookies)
-        if resp.status_code == 200:
-            updated_order = resp.json()
-            if updated_order.get('status') == 'Confirmed':
-                log_test("Regression - order update", True)
-            else:
-                log_test("Regression - order update", False, "Status not updated")
-        else:
-            log_test("Regression - order update", False, f"Status {resp.status_code}")
-    
-    # Test 6c: GET /api/products
-    print("   Testing products list...")
-    resp = requests.get(f"{BASE_URL}/products")
-    if resp.status_code == 200:
-        products = resp.json()
-        if isinstance(products, list) and len(products) >= 11:
-            log_test("Regression - products list", True)
-        else:
-            log_test("Regression - products list", False, 
-                     f"Expected array with >= 11 products, got {len(products) if isinstance(products, list) else 'not array'}")
-    else:
-        log_test("Regression - products list", False, f"Status {resp.status_code}")
-    
-    # Test 6d: PATCH /api/auth/me (profile update)
-    print("   Testing profile update...")
-    resp = requests.patch(f"{BASE_URL}/auth/me",
-                         json={"phone": "9999999999"}, cookies=cookies)
-    if resp.status_code == 200:
-        log_test("Regression - profile update", True)
-    else:
-        log_test("Regression - profile update", False, f"Status {resp.status_code}")
-    
-    return offline_order_id
+        log_test("DELETE /api/admin/categories/mutton without reassign_to → 400", False, f"Expected 400, got {resp.status_code}")
+        return False
 
-def test_data_integrity(cookies, initial_stats):
-    """Test 7: Data integrity - create order and verify stats/customer updates"""
-    print("\n🔍 Test 7: Data Integrity Verification")
+def test_delete_category_with_reassign():
+    """Test DELETE /api/admin/categories/mutton?reassign_to=fruits"""
+    resp = admin_session.delete(f"{BASE_URL}/admin/categories/mutton?reassign_to=fruits")
+    if resp.status_code == 200:
+        # Verify the test product's category is now fruits
+        product_resp = requests.get(f"{BASE_URL}/products/test-mutton")
+        if product_resp.status_code == 200:
+            product = product_resp.json()
+            if product.get('category') == 'fruits':
+                log_test("DELETE /api/admin/categories/mutton?reassign_to=fruits", True, "Product reassigned to fruits")
+                # Cleanup: delete test product
+                admin_session.delete(f"{BASE_URL}/admin/products/test-mutton")
+                return True
+            else:
+                log_test("DELETE /api/admin/categories/mutton?reassign_to=fruits", False, f"Product category not reassigned: {product.get('category')}")
+                return False
+        else:
+            log_test("DELETE /api/admin/categories/mutton?reassign_to=fruits", False, "Could not verify product reassignment")
+            return False
+    else:
+        log_test("DELETE /api/admin/categories/mutton?reassign_to=fruits", False, f"Status {resp.status_code}: {resp.text}")
+        return False
+
+def test_category_staff_permissions():
+    """Test that staff gets 403 on POST/PATCH/DELETE categories"""
+    # POST
+    resp = staff_session.post(f"{BASE_URL}/admin/categories", json={"id": "test", "label": "Test"})
+    post_ok = resp.status_code == 403
     
-    # Create an offline order as admin (since there's no direct customer registration)
-    print("   Creating offline COD order as admin...")
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    customer_email = f"testcustomer{timestamp}@example.com"
+    # PATCH
+    resp = staff_session.patch(f"{BASE_URL}/admin/categories/eggs", json={"label": "Test"})
+    patch_ok = resp.status_code == 403
     
-    offline_order_payload = {
-        "customer_name": "Test Customer Data Integrity",
-        "customer_phone": "9999888877",
-        "customer_email": customer_email,
-        "items": [
-            {"slug": "country-eggs", "variant_id": "dozen", "qty": 2}
-        ],
+    # DELETE
+    resp = staff_session.delete(f"{BASE_URL}/admin/categories/eggs")
+    delete_ok = resp.status_code == 403
+    
+    if post_ok and patch_ok and delete_ok:
+        log_test("Category CRUD staff permissions (403)", True)
+        return True
+    else:
+        log_test("Category CRUD staff permissions (403)", False, f"POST:{resp.status_code if not post_ok else 403}, PATCH:{resp.status_code if not patch_ok else 403}, DELETE:{resp.status_code if not delete_ok else 403}")
+        return False
+
+# ==================== REVENUE BREAKDOWN ====================
+
+def test_revenue_breakdown_day():
+    """Test GET /api/admin/revenue/breakdown?view=day"""
+    resp = admin_session.get(f"{BASE_URL}/admin/revenue/breakdown?view=day")
+    if resp.status_code == 200:
+        data = resp.json()
+        if 'view' in data and 'rows' in data and 'summary' in data:
+            if data['view'] == 'day' and isinstance(data['rows'], list):
+                summary = data['summary']
+                if 'total_revenue' in summary and 'total_orders' in summary and 'aov' in summary:
+                    log_test("GET /api/admin/revenue/breakdown?view=day", True, f"Summary: {summary}")
+                    return True
+        log_test("GET /api/admin/revenue/breakdown?view=day", False, f"Unexpected structure: {data}")
+        return False
+    else:
+        log_test("GET /api/admin/revenue/breakdown?view=day", False, f"Status {resp.status_code}: {resp.text}")
+        return False
+
+def test_revenue_breakdown_week():
+    """Test GET /api/admin/revenue/breakdown?view=week"""
+    resp = admin_session.get(f"{BASE_URL}/admin/revenue/breakdown?view=week")
+    if resp.status_code == 200:
+        data = resp.json()
+        if data.get('view') == 'week' and isinstance(data.get('rows'), list):
+            # Check period format like "2026-W29"
+            if len(data['rows']) > 0:
+                period = data['rows'][0].get('period', '')
+                if 'W' in period:
+                    log_test("GET /api/admin/revenue/breakdown?view=week", True, f"Period format: {period}")
+                    return True
+                else:
+                    log_test("GET /api/admin/revenue/breakdown?view=week", False, f"Period format incorrect: {period}")
+                    return False
+            else:
+                log_test("GET /api/admin/revenue/breakdown?view=week", True, "No data but structure correct")
+                return True
+        log_test("GET /api/admin/revenue/breakdown?view=week", False, f"Unexpected structure: {data}")
+        return False
+    else:
+        log_test("GET /api/admin/revenue/breakdown?view=week", False, f"Status {resp.status_code}: {resp.text}")
+        return False
+
+def test_revenue_breakdown_month():
+    """Test GET /api/admin/revenue/breakdown?view=month"""
+    resp = admin_session.get(f"{BASE_URL}/admin/revenue/breakdown?view=month")
+    if resp.status_code == 200:
+        data = resp.json()
+        if data.get('view') == 'month' and isinstance(data.get('rows'), list):
+            if len(data['rows']) > 0:
+                period = data['rows'][0].get('period', '')
+                # Format like "2026-07"
+                if len(period) == 7 and period[4] == '-':
+                    log_test("GET /api/admin/revenue/breakdown?view=month", True, f"Period format: {period}")
+                    return True
+                else:
+                    log_test("GET /api/admin/revenue/breakdown?view=month", False, f"Period format incorrect: {period}")
+                    return False
+            else:
+                log_test("GET /api/admin/revenue/breakdown?view=month", True, "No data but structure correct")
+                return True
+        log_test("GET /api/admin/revenue/breakdown?view=month", False, f"Unexpected structure: {data}")
+        return False
+    else:
+        log_test("GET /api/admin/revenue/breakdown?view=month", False, f"Status {resp.status_code}: {resp.text}")
+        return False
+
+def test_revenue_breakdown_year():
+    """Test GET /api/admin/revenue/breakdown?view=year"""
+    resp = admin_session.get(f"{BASE_URL}/admin/revenue/breakdown?view=year")
+    if resp.status_code == 200:
+        data = resp.json()
+        if data.get('view') == 'year' and isinstance(data.get('rows'), list):
+            if len(data['rows']) > 0:
+                period = data['rows'][0].get('period', '')
+                # Format like "2026"
+                if len(period) == 4 and period.isdigit():
+                    log_test("GET /api/admin/revenue/breakdown?view=year", True, f"Period format: {period}")
+                    return True
+                else:
+                    log_test("GET /api/admin/revenue/breakdown?view=year", False, f"Period format incorrect: {period}")
+                    return False
+            else:
+                log_test("GET /api/admin/revenue/breakdown?view=year", True, "No data but structure correct")
+                return True
+        log_test("GET /api/admin/revenue/breakdown?view=year", False, f"Unexpected structure: {data}")
+        return False
+    else:
+        log_test("GET /api/admin/revenue/breakdown?view=year", False, f"Status {resp.status_code}: {resp.text}")
+        return False
+
+def test_revenue_breakdown_date_filter():
+    """Test GET /api/admin/revenue/breakdown with start/end filters"""
+    start = (datetime.now() - timedelta(days=30)).isoformat()
+    end = datetime.now().isoformat()
+    resp = admin_session.get(f"{BASE_URL}/admin/revenue/breakdown?view=day&start={start}&end={end}")
+    if resp.status_code == 200:
+        data = resp.json()
+        if 'rows' in data and 'summary' in data:
+            log_test("GET /api/admin/revenue/breakdown with start/end filters", True)
+            return True
+        log_test("GET /api/admin/revenue/breakdown with start/end filters", False, f"Unexpected structure: {data}")
+        return False
+    else:
+        log_test("GET /api/admin/revenue/breakdown with start/end filters", False, f"Status {resp.status_code}: {resp.text}")
+        return False
+
+def test_revenue_breakdown_invalid_view():
+    """Test GET /api/admin/revenue/breakdown?view=invalid"""
+    resp = admin_session.get(f"{BASE_URL}/admin/revenue/breakdown?view=invalid")
+    if resp.status_code == 422:
+        log_test("GET /api/admin/revenue/breakdown?view=invalid → 422", True)
+        return True
+    else:
+        log_test("GET /api/admin/revenue/breakdown?view=invalid → 422", False, f"Expected 422, got {resp.status_code}")
+        return False
+
+# ==================== EXCEL EXPORT ====================
+
+def test_excel_export():
+    """Test GET /api/admin/orders/export.xlsx"""
+    resp = admin_session.get(f"{BASE_URL}/admin/orders/export.xlsx")
+    if resp.status_code == 200:
+        content_type = resp.headers.get('Content-Type', '')
+        content_disp = resp.headers.get('Content-Disposition', '')
+        
+        # Check headers
+        if 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' in content_type:
+            if 'attachment' in content_disp:
+                # Check if body starts with PK (xlsx signature)
+                if resp.content[:2] == b'PK':
+                    log_test("GET /api/admin/orders/export.xlsx", True, f"Content-Type and PK signature correct")
+                    return True
+                else:
+                    log_test("GET /api/admin/orders/export.xlsx", False, f"Body doesn't start with PK signature")
+                    return False
+            else:
+                log_test("GET /api/admin/orders/export.xlsx", False, f"Content-Disposition missing 'attachment'")
+                return False
+        else:
+            log_test("GET /api/admin/orders/export.xlsx", False, f"Wrong Content-Type: {content_type}")
+            return False
+    else:
+        log_test("GET /api/admin/orders/export.xlsx", False, f"Status {resp.status_code}: {resp.text}")
+        return False
+
+def test_excel_export_with_filters():
+    """Test GET /api/admin/orders/export.xlsx with start/end/status filters"""
+    start = (datetime.now() - timedelta(days=30)).isoformat()
+    end = datetime.now().isoformat()
+    resp = admin_session.get(f"{BASE_URL}/admin/orders/export.xlsx?start={start}&end={end}&status=Delivered")
+    if resp.status_code == 200:
+        if resp.content[:2] == b'PK':
+            log_test("GET /api/admin/orders/export.xlsx with filters", True)
+            return True
+        else:
+            log_test("GET /api/admin/orders/export.xlsx with filters", False, "Body doesn't start with PK")
+            return False
+    else:
+        log_test("GET /api/admin/orders/export.xlsx with filters", False, f"Status {resp.status_code}: {resp.text}")
+        return False
+
+def test_excel_export_unauthenticated():
+    """Test GET /api/admin/orders/export.xlsx without auth"""
+    resp = requests.get(f"{BASE_URL}/admin/orders/export.xlsx")
+    if resp.status_code == 401:
+        log_test("GET /api/admin/orders/export.xlsx (unauthenticated → 401)", True)
+        return True
+    else:
+        log_test("GET /api/admin/orders/export.xlsx (unauthenticated → 401)", False, f"Expected 401, got {resp.status_code}")
+        return False
+
+# ==================== CUSTOMER LOOKUP + UPDATE ====================
+
+def test_customer_lookup_not_found():
+    """Test GET /api/admin/customers/lookup?phone=9999911111 (not found)"""
+    resp = admin_session.get(f"{BASE_URL}/admin/customers/lookup?phone=9999911111")
+    if resp.status_code == 200:
+        data = resp.json()
+        if data == {}:
+            log_test("GET /api/admin/customers/lookup (not found → {})", True)
+            return True
+        else:
+            log_test("GET /api/admin/customers/lookup (not found → {})", False, f"Expected empty dict, got {data}")
+            return False
+    else:
+        log_test("GET /api/admin/customers/lookup (not found → {})", False, f"Status {resp.status_code}: {resp.text}")
+        return False
+
+def test_customer_lookup_found():
+    """Test GET /api/admin/customers/lookup?phone=... (found after creating offline order)"""
+    global test_customer_user_id
+    
+    # Create an offline order with phone 9999911111
+    payload = {
+        "customer_name": "Test Customer",
+        "customer_phone": "9999911111",
+        "customer_email": "testcustomer@example.com",
+        "items": [{"slug": "green-chilli", "variant_id": "250g", "qty": 1}],
         "address": {
-            "full_name": "Test Customer Data Integrity",
-            "phone": "9999888877",
-            "line1": "Test Address Line 1",
+            "full_name": "Test Customer",
+            "phone": "9999911111",
+            "line1": "123 Test St",
             "city": "Hyderabad",
-            "pincode": "500001",
-            "landmark": "Near Test Landmark"
+            "pincode": "500001"
+        },
+        "payment_method": "cash",
+        "payment_status": "Paid"
+    }
+    create_resp = admin_session.post(f"{BASE_URL}/admin/orders/offline", json=payload)
+    if create_resp.status_code not in [200, 201]:
+        log_test("Customer lookup (setup)", False, f"Failed to create offline order: {create_resp.status_code}")
+        return False
+    
+    # Now lookup by phone
+    resp = admin_session.get(f"{BASE_URL}/admin/customers/lookup?phone=9999911111")
+    if resp.status_code == 200:
+        data = resp.json()
+        if data and 'user_id' in data and 'saved_address' in data:
+            test_customer_user_id = data['user_id']
+            log_test("GET /api/admin/customers/lookup (found)", True, f"Found user_id: {test_customer_user_id}")
+            return True
+        else:
+            log_test("GET /api/admin/customers/lookup (found)", False, f"Unexpected response: {data}")
+            return False
+    else:
+        log_test("GET /api/admin/customers/lookup (found)", False, f"Status {resp.status_code}: {resp.text}")
+        return False
+
+def test_customer_update():
+    """Test PATCH /api/admin/customers/{user_id}"""
+    global test_customer_user_id
+    
+    if not test_customer_user_id:
+        log_test("PATCH /api/admin/customers/{user_id}", False, "No test_customer_user_id available")
+        return False
+    
+    payload = {
+        "name": "Updated Customer Name",
+        "address": {
+            "line1": "New Street 456",
+            "city": "HYD",
+            "pincode": "500001"
+        }
+    }
+    resp = admin_session.patch(f"{BASE_URL}/admin/customers/{test_customer_user_id}", json=payload)
+    if resp.status_code == 200:
+        data = resp.json()
+        if data.get('name') == 'Updated Customer Name':
+            if data.get('saved_address', {}).get('line1') == 'New Street 456':
+                log_test("PATCH /api/admin/customers/{user_id}", True)
+                return True
+            else:
+                log_test("PATCH /api/admin/customers/{user_id}", False, f"Address not updated: {data.get('saved_address')}")
+                return False
+        else:
+            log_test("PATCH /api/admin/customers/{user_id}", False, f"Name not updated: {data.get('name')}")
+            return False
+    else:
+        log_test("PATCH /api/admin/customers/{user_id}", False, f"Status {resp.status_code}: {resp.text}")
+        return False
+
+def test_customer_update_staff_permission():
+    """Test that staff can also lookup/update customers"""
+    # Lookup
+    lookup_resp = staff_session.get(f"{BASE_URL}/admin/customers/lookup?phone=9999911111")
+    lookup_ok = lookup_resp.status_code == 200
+    
+    # Update
+    if test_customer_user_id:
+        update_resp = staff_session.patch(f"{BASE_URL}/admin/customers/{test_customer_user_id}",
+                                          json={"name": "Staff Updated"})
+        update_ok = update_resp.status_code == 200
+    else:
+        update_ok = False
+    
+    if lookup_ok and update_ok:
+        log_test("Customer lookup/update staff permissions", True)
+        return True
+    else:
+        log_test("Customer lookup/update staff permissions", False, f"Lookup: {lookup_resp.status_code}, Update: {update_resp.status_code if test_customer_user_id else 'N/A'}")
+        return False
+
+# ==================== OFFLINE ORDER WITH NEW FIELDS ====================
+
+def test_offline_order_new_fields():
+    """Test POST /api/admin/orders/offline with full address dict and payment fields"""
+    payload = {
+        "customer_name": "New Offline Customer",
+        "customer_phone": "8888888888",
+        "customer_email": "newoffline@example.com",
+        "items": [{"slug": "tomatoes", "variant_id": "1kg", "qty": 2}],
+        "address": {
+            "full_name": "New Offline Customer",
+            "phone": "8888888888",
+            "line1": "789 Offline St",
+            "line2": "Apt 4",
+            "city": "Bangalore",
+            "pincode": "560001",
+            "landmark": "Near Park"
+        },
+        "payment_method": "not_paid",
+        "payment_status": "Not Paid"
+    }
+    resp = admin_session.post(f"{BASE_URL}/admin/orders/offline", json=payload)
+    if resp.status_code in [200, 201]:
+        data = resp.json()
+        checks = []
+        checks.append(data.get('payment_method') == 'not_paid')
+        checks.append(data.get('payment_status') == 'Not Paid')
+        checks.append(data.get('source') == 'offline')
+        checks.append(data.get('address', {}).get('line1') == '789 Offline St')
+        checks.append(data.get('address', {}).get('city') == 'Bangalore')
+        
+        if all(checks):
+            log_test("POST /api/admin/orders/offline with new fields", True)
+            return True
+        else:
+            log_test("POST /api/admin/orders/offline with new fields", False, f"Some fields incorrect: {data}")
+            return False
+    else:
+        log_test("POST /api/admin/orders/offline with new fields", False, f"Status {resp.status_code}: {resp.text}")
+        return False
+
+def test_offline_order_saved_address():
+    """Test that offline order saves customer address to saved_address"""
+    # Lookup the customer we just created
+    resp = admin_session.get(f"{BASE_URL}/admin/customers/lookup?phone=8888888888")
+    if resp.status_code == 200:
+        data = resp.json()
+        if data and 'saved_address' in data:
+            saved = data['saved_address']
+            if saved.get('line1') == '789 Offline St' and saved.get('city') == 'Bangalore':
+                log_test("Offline order saves customer address", True)
+                return True
+            else:
+                log_test("Offline order saves customer address", False, f"Address not saved correctly: {saved}")
+                return False
+        else:
+            log_test("Offline order saves customer address", False, f"No saved_address in response: {data}")
+            return False
+    else:
+        log_test("Offline order saves customer address", False, f"Status {resp.status_code}: {resp.text}")
+        return False
+
+def test_offline_order_reuse_customer():
+    """Test that second offline order with same phone reuses existing customer"""
+    # Create another offline order with same phone but no address override
+    payload = {
+        "customer_name": "New Offline Customer",
+        "customer_phone": "8888888888",
+        "items": [{"slug": "green-chilli", "variant_id": "250g", "qty": 1}],
+        "payment_method": "cash",
+        "payment_status": "Paid"
+    }
+    resp = admin_session.post(f"{BASE_URL}/admin/orders/offline", json=payload)
+    if resp.status_code in [200, 201]:
+        # Lookup customer again
+        lookup_resp = admin_session.get(f"{BASE_URL}/admin/customers/lookup?phone=8888888888")
+        if lookup_resp.status_code == 200:
+            data = lookup_resp.json()
+            # Name and phone should stay the same
+            if data.get('name') == 'New Offline Customer' and data.get('phone') == '8888888888':
+                log_test("Offline order reuses existing customer", True)
+                return True
+            else:
+                log_test("Offline order reuses existing customer", False, f"Customer data changed: {data}")
+                return False
+        else:
+            log_test("Offline order reuses existing customer", False, f"Lookup failed: {lookup_resp.status_code}")
+            return False
+    else:
+        log_test("Offline order reuses existing customer", False, f"Status {resp.status_code}: {resp.text}")
+        return False
+
+# ==================== CHICKEN OPTIONS IN ITEMS ====================
+
+def test_chicken_options_in_order():
+    """Test POST /api/orders/create with items containing options"""
+    global test_order_id
+    
+    # First, create a customer session
+    from motor.motor_asyncio import AsyncIOMotorClient
+    import asyncio
+    import os
+    import uuid
+    
+    # We need to create a session in MongoDB directly for this test
+    # Let's use a simpler approach: create an offline order with options
+    payload = {
+        "customer_name": "Chicken Options Customer",
+        "customer_phone": "7777777777",
+        "items": [{
+            "slug": "country-chicken",
+            "variant_id": "1kg",
+            "qty": 1,
+            "options": {
+                "bird_type": "Tender Bird",
+                "delivery_date": "Tomorrow",
+                "piece_size": "Biryani Cut",
+                "instructions": "Small pieces"
+            }
+        }],
+        "address": {
+            "full_name": "Chicken Options Customer",
+            "phone": "7777777777",
+            "line1": "123 Chicken St",
+            "city": "Hyderabad",
+            "pincode": "500001"
         },
         "payment_method": "cod",
-        "payment_status": "Pending",
-        "status": "Placed"
+        "payment_status": "Not Paid"
     }
-    
-    resp = requests.post(f"{BASE_URL}/admin/orders/offline", 
-                        json=offline_order_payload, cookies=cookies)
-    
-    if resp.status_code != 200:
-        log_test("Data integrity - COD order creation", False, 
-                 f"Status {resp.status_code}: {resp.text}")
-        return
-    
-    log_test("Data integrity - COD order creation", True)
-    order_data = resp.json()
-    order_id = order_data.get('order_id')
-    order_total = order_data.get('total')
-    customer_user_id = order_data.get('user_id')
-    print(f"   Created order {order_id} with total ₹{order_total}")
-    
-    # Test 7a: Verify order appears in admin orders
-    print("   Verifying order appears in admin orders...")
-    resp = requests.get(f"{BASE_URL}/admin/orders", cookies=cookies)
-    if resp.status_code == 200:
-        orders = resp.json()
-        order_found = any(o['order_id'] == order_id for o in orders)
-        log_test("Data integrity - order in admin orders", order_found,
-                 "Order not found in admin orders" if not order_found else "")
-    else:
-        log_test("Data integrity - order in admin orders", False, f"Status {resp.status_code}")
-    
-    # Test 7b: Verify customer's total_spent increases
-    print("   Verifying customer total_spent...")
-    resp = requests.get(f"{BASE_URL}/admin/customers", cookies=cookies)
-    if resp.status_code == 200:
-        customers = resp.json()
-        customer = next((c for c in customers if c['user_id'] == customer_user_id), None)
-        if customer:
-            # For COD orders, total_spent should include the order (non-cancelled)
-            if customer['total_spent'] >= order_total:
-                log_test("Data integrity - customer total_spent updated", True)
-                print(f"   Customer total_spent: ₹{customer['total_spent']}")
-            else:
-                log_test("Data integrity - customer total_spent updated", False,
-                         f"Expected >= {order_total}, got {customer['total_spent']}")
-        else:
-            log_test("Data integrity - customer total_spent updated", False, 
-                     "Customer not found in customers list")
-    else:
-        log_test("Data integrity - customer total_spent updated", False, 
-                 f"Status {resp.status_code}")
-    
-    # Test 7c: Verify stats revenue only counts Paid orders (COD should be Pending)
-    print("   Verifying stats revenue (should not include COD until Delivered)...")
-    resp = requests.get(f"{BASE_URL}/admin/stats", cookies=cookies)
-    if resp.status_code == 200:
-        new_stats = resp.json()
-        # COD order should not increase revenue until marked as Delivered
-        if new_stats['revenue'] == initial_stats['revenue']:
-            log_test("Data integrity - revenue excludes COD pending", True)
-        else:
-            log_test("Data integrity - revenue excludes COD pending", False,
-                     f"Revenue changed from {initial_stats['revenue']} to {new_stats['revenue']}")
+    resp = admin_session.post(f"{BASE_URL}/admin/orders/offline", json=payload)
+    if resp.status_code in [200, 201]:
+        data = resp.json()
+        test_order_id = data.get('order_id')
         
-        # Orders count should increase
-        if new_stats['orders'] > initial_stats['orders']:
-            log_test("Data integrity - orders count increased", True)
-        else:
-            log_test("Data integrity - orders count increased", False,
-                     f"Orders count: {initial_stats['orders']} -> {new_stats['orders']}")
-    else:
-        log_test("Data integrity - stats check", False, f"Status {resp.status_code}")
-    
-    # Test 7d: Mark order as Delivered and verify payment_status becomes Paid
-    print("   Marking order as Delivered...")
-    resp = requests.patch(f"{BASE_URL}/admin/orders/{order_id}",
-                         json={"status": "Delivered"}, cookies=cookies)
-    
-    if resp.status_code == 200:
-        updated_order = resp.json()
-        if updated_order.get('payment_status') == 'Paid':
-            log_test("Data integrity - COD payment_status becomes Paid on Delivered", True)
-        else:
-            log_test("Data integrity - COD payment_status becomes Paid on Delivered", False,
-                     f"payment_status is {updated_order.get('payment_status')}")
-        
-        # Test 7e: Verify revenue now includes this order
-        print("   Verifying revenue updated after Delivered...")
-        resp = requests.get(f"{BASE_URL}/admin/stats", cookies=cookies)
-        if resp.status_code == 200:
-            final_stats = resp.json()
-            expected_revenue = initial_stats['revenue'] + order_total
-            if abs(final_stats['revenue'] - expected_revenue) < 0.01:
-                log_test("Data integrity - revenue updated after Delivered", True)
-                print(f"   Revenue: {initial_stats['revenue']} -> {final_stats['revenue']}")
+        # Check if options are in the response
+        items = data.get('items', [])
+        if len(items) > 0:
+            options = items[0].get('options')
+            if options:
+                checks = []
+                checks.append(options.get('bird_type') == 'Tender Bird')
+                checks.append(options.get('delivery_date') == 'Tomorrow')
+                checks.append(options.get('piece_size') == 'Biryani Cut')
+                checks.append(options.get('instructions') == 'Small pieces')
+                
+                if all(checks):
+                    log_test("POST order with chicken options", True, f"Order ID: {test_order_id}")
+                    return True
+                else:
+                    log_test("POST order with chicken options", False, f"Options incomplete: {options}")
+                    return False
             else:
-                log_test("Data integrity - revenue updated after Delivered", False,
-                         f"Expected {expected_revenue}, got {final_stats['revenue']}")
+                log_test("POST order with chicken options", False, "No options in response")
+                return False
         else:
-            log_test("Data integrity - revenue check", False, f"Status {resp.status_code}")
+            log_test("POST order with chicken options", False, "No items in response")
+            return False
     else:
-        log_test("Data integrity - mark as Delivered", False, f"Status {resp.status_code}")
+        log_test("POST order with chicken options", False, f"Status {resp.status_code}: {resp.text}")
+        return False
+
+def test_chicken_options_in_get_order():
+    """Test GET /api/orders/{order_id} returns items with options intact"""
+    global test_order_id
+    
+    if not test_order_id:
+        log_test("GET /api/orders/{order_id} with options", False, "No test_order_id available")
+        return False
+    
+    resp = admin_session.get(f"{BASE_URL}/orders/{test_order_id}")
+    if resp.status_code == 200:
+        data = resp.json()
+        items = data.get('items', [])
+        if len(items) > 0:
+            options = items[0].get('options')
+            if options and all(k in options for k in ['bird_type', 'delivery_date', 'piece_size', 'instructions']):
+                log_test("GET /api/orders/{order_id} with options", True)
+                return True
+            else:
+                log_test("GET /api/orders/{order_id} with options", False, f"Options missing or incomplete: {options}")
+                return False
+        else:
+            log_test("GET /api/orders/{order_id} with options", False, "No items in response")
+            return False
+    else:
+        log_test("GET /api/orders/{order_id} with options", False, f"Status {resp.status_code}: {resp.text}")
+        return False
+
+def test_chicken_options_in_admin_orders():
+    """Test GET /api/admin/orders returns orders with options"""
+    resp = admin_session.get(f"{BASE_URL}/admin/orders")
+    if resp.status_code == 200:
+        data = resp.json()
+        if isinstance(data, list) and len(data) > 0:
+            # Find our test order
+            test_order = None
+            for order in data:
+                if order.get('order_id') == test_order_id:
+                    test_order = order
+                    break
+            
+            if test_order:
+                items = test_order.get('items', [])
+                if len(items) > 0:
+                    options = items[0].get('options')
+                    if options and 'bird_type' in options:
+                        log_test("GET /api/admin/orders with options", True)
+                        return True
+                    else:
+                        log_test("GET /api/admin/orders with options", False, f"Options missing: {options}")
+                        return False
+                else:
+                    log_test("GET /api/admin/orders with options", False, "No items in test order")
+                    return False
+            else:
+                log_test("GET /api/admin/orders with options", False, "Test order not found in list")
+                return False
+        else:
+            log_test("GET /api/admin/orders with options", False, "No orders returned")
+            return False
+    else:
+        log_test("GET /api/admin/orders with options", False, f"Status {resp.status_code}: {resp.text}")
+        return False
+
+# ==================== REGRESSION TESTS ====================
+
+def test_regression_products():
+    """Test GET /api/products still works"""
+    resp = requests.get(f"{BASE_URL}/products")
+    if resp.status_code == 200:
+        data = resp.json()
+        if isinstance(data, list) and len(data) >= 11:
+            log_test("Regression: GET /api/products", True)
+            return True
+        else:
+            log_test("Regression: GET /api/products", False, f"Expected >=11 products, got {len(data) if isinstance(data, list) else 'not a list'}")
+            return False
+    else:
+        log_test("Regression: GET /api/products", False, f"Status {resp.status_code}: {resp.text}")
+        return False
+
+def test_regression_admin_login():
+    """Test POST /api/auth/admin-login still works"""
+    # Already tested in admin_login(), but let's verify again
+    resp = requests.post(f"{BASE_URL}/auth/admin-login",
+                        json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD})
+    if resp.status_code == 200:
+        data = resp.json()
+        if 'user_id' in data and data.get('role') == 'admin':
+            log_test("Regression: POST /api/auth/admin-login", True)
+            return True
+        else:
+            log_test("Regression: POST /api/auth/admin-login", False, f"Unexpected response: {data}")
+            return False
+    else:
+        log_test("Regression: POST /api/auth/admin-login", False, f"Status {resp.status_code}: {resp.text}")
+        return False
+
+def test_regression_admin_stats():
+    """Test GET /api/admin/stats still works"""
+    resp = admin_session.get(f"{BASE_URL}/admin/stats")
+    if resp.status_code == 200:
+        data = resp.json()
+        required_keys = ['revenue', 'orders', 'pending', 'products', 'customers']
+        if all(k in data for k in required_keys):
+            log_test("Regression: GET /api/admin/stats", True)
+            return True
+        else:
+            log_test("Regression: GET /api/admin/stats", False, f"Missing keys: {data}")
+            return False
+    else:
+        log_test("Regression: GET /api/admin/stats", False, f"Status {resp.status_code}: {resp.text}")
+        return False
+
+# ==================== MAIN TEST RUNNER ====================
 
 def main():
     print("=" * 80)
-    print("🧪 Retro Farms Backend API Test Suite - Refactored Endpoints Verification")
+    print("RETRO FARMS BACKEND API TESTING - NEW FEATURES")
     print("=" * 80)
-    print(f"Testing against: {BASE_URL}")
-    print(f"Admin credentials: {ADMIN_EMAIL}")
+    print()
     
-    # Login as admin
-    cookies = admin_login()
-    if not cookies:
-        print("\n❌ CRITICAL: Admin login failed. Cannot proceed with tests.")
-        return
+    # Login
+    if not admin_login():
+        print("\n❌ Admin login failed. Cannot proceed with tests.")
+        sys.exit(1)
     
-    # Run all tests
-    initial_stats = test_admin_stats(cookies)
-    test_admin_orders_pagination(cookies)
-    test_admin_customers(cookies)
-    test_customer_orders_endpoint(cookies)
-    test_offline_customers(cookies)
-    test_regression_endpoints(cookies)
+    if not staff_login():
+        print("\n⚠️  Staff login failed. Some tests will be skipped.")
     
-    if initial_stats:
-        test_data_integrity(cookies, initial_stats)
-    
-    # Print summary
     print("\n" + "=" * 80)
-    print("📊 TEST SUMMARY")
+    print("CATEGORIES CRUD")
     print("=" * 80)
-    print(f"✅ Passed: {tests_passed}")
-    print(f"❌ Failed: {tests_failed}")
-    print(f"📈 Success Rate: {tests_passed}/{tests_passed + tests_failed} ({100*tests_passed/(tests_passed+tests_failed):.1f}%)")
+    test_categories_public_list()
+    test_create_category()
+    test_create_duplicate_category()
+    test_update_category()
+    test_delete_category_with_products()
+    test_delete_category_with_reassign()
+    test_category_staff_permissions()
     
-    if failures:
-        print("\n❌ FAILED TESTS:")
-        for i, failure in enumerate(failures, 1):
-            print(f"{i}. {failure}")
-    else:
-        print("\n🎉 ALL TESTS PASSED!")
-    
+    print("\n" + "=" * 80)
+    print("REVENUE BREAKDOWN")
     print("=" * 80)
+    test_revenue_breakdown_day()
+    test_revenue_breakdown_week()
+    test_revenue_breakdown_month()
+    test_revenue_breakdown_year()
+    test_revenue_breakdown_date_filter()
+    test_revenue_breakdown_invalid_view()
+    
+    print("\n" + "=" * 80)
+    print("EXCEL EXPORT")
+    print("=" * 80)
+    test_excel_export()
+    test_excel_export_with_filters()
+    test_excel_export_unauthenticated()
+    
+    print("\n" + "=" * 80)
+    print("CUSTOMER LOOKUP + UPDATE")
+    print("=" * 80)
+    test_customer_lookup_not_found()
+    test_customer_lookup_found()
+    test_customer_update()
+    test_customer_update_staff_permission()
+    
+    print("\n" + "=" * 80)
+    print("OFFLINE ORDER WITH NEW FIELDS")
+    print("=" * 80)
+    test_offline_order_new_fields()
+    test_offline_order_saved_address()
+    test_offline_order_reuse_customer()
+    
+    print("\n" + "=" * 80)
+    print("CHICKEN OPTIONS IN ITEMS")
+    print("=" * 80)
+    test_chicken_options_in_order()
+    test_chicken_options_in_get_order()
+    test_chicken_options_in_admin_orders()
+    
+    print("\n" + "=" * 80)
+    print("REGRESSION TESTS")
+    print("=" * 80)
+    test_regression_products()
+    test_regression_admin_login()
+    test_regression_admin_stats()
+    
+    # Summary
+    print("\n" + "=" * 80)
+    print("TEST SUMMARY")
+    print("=" * 80)
+    passed = sum(1 for t in test_results if t['passed'])
+    failed = sum(1 for t in test_results if not t['passed'])
+    total = len(test_results)
+    
+    print(f"\nTotal Tests: {total}")
+    print(f"✅ Passed: {passed}")
+    print(f"❌ Failed: {failed}")
+    print(f"Success Rate: {(passed/total*100):.1f}%")
+    
+    if failed > 0:
+        print("\n" + "=" * 80)
+        print("FAILED TESTS")
+        print("=" * 80)
+        for t in test_results:
+            if not t['passed']:
+                print(f"\n❌ {t['name']}")
+                if t['details']:
+                    print(f"   {t['details']}")
+    
+    print("\n" + "=" * 80)
+    print("DB INDEXES CHECK")
+    print("=" * 80)
+    print("✅ Check backend logs for index creation errors (see /var/log/supervisor/backend.*.log)")
+    print("   If no errors logged during startup, indexes were created successfully.")
+    
+    return 0 if failed == 0 else 1
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

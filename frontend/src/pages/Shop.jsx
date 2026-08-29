@@ -2,22 +2,23 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import api from '../lib/api';
 
-const CATEGORIES = [
-  { id: 'all', label: 'All' },
-  { id: 'eggs', label: 'Country Eggs' },
-  { id: 'chicken', label: 'Country Chicken' },
-  { id: 'fruits', label: 'Fruits' },
-  { id: 'vegetables', label: 'Vegetables' },
-];
-
 const Shop = () => {
   const [params, setParams] = useSearchParams();
   const active = params.get('cat') || 'all';
   const [products, setProducts] = useState([]);
+  const [categories, setCategories] = useState([]);
 
-  useEffect(() => { api.get('/products').then((r) => setProducts(r.data)).catch(() => {}); }, []);
+  useEffect(() => {
+    api.get('/products').then((r) => setProducts(r.data)).catch(() => {});
+    api.get('/categories').then((r) => setCategories(r.data)).catch(() => {});
+  }, []);
 
-  const items = useMemo(() => (active === 'all' ? products : products.filter((p) => p.category === active)), [active, products]);
+  const items = useMemo(
+    () => (active === 'all' ? products : products.filter((p) => p.category === active)),
+    [active, products],
+  );
+
+  const allCats = [{ id: 'all', label: 'All' }, ...categories];
 
   return (
     <div className="bg-[#F7F1E5] min-h-screen">
@@ -25,7 +26,7 @@ const Shop = () => {
         <div className="text-[#C96C1B] tracking-[0.3em] text-xs mb-4">THE SHOP</div>
         <h1 className="font-serif text-5xl md:text-6xl text-[#2B1D11] leading-tight mb-10">Straight from our fields.</h1>
         <div className="flex flex-wrap gap-3">
-          {CATEGORIES.map((c) => (
+          {allCats.map((c) => (
             <button key={c.id} onClick={() => setParams(c.id === 'all' ? {} : { cat: c.id })}
               className={`px-5 py-2 rounded-full text-sm transition-colors ${active === c.id ? 'bg-[#2B1D11] text-[#F7F1E5]' : 'bg-white border border-[#E4D9C1] text-[#2B1D11] hover:border-[#2B1D11]'}`}>
               {c.label}
@@ -51,6 +52,7 @@ const Shop = () => {
               </div>
             </Link>
           ))}
+          {items.length === 0 && <div className="col-span-full text-center py-14 text-[#7A6A55]">No products in this category yet.</div>}
         </div>
       </section>
     </div>

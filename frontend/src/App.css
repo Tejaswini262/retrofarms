@@ -135,4 +135,23 @@ html {
 /* Print-friendly invoice */
 @media print {
     body { background: white !important; }
+    header, footer, nav, aside, .print\\:hidden { display: none !important; }
+    /* When printing the invoice modal, hide everything else */
+    body:has(#invoice-print-area) > *:not(#invoice-print-area) {
+        visibility: hidden;
+    }
+    #invoice-print-area, #invoice-print-area * {
+        visibility: visible;
+    }
+    #invoice-print-area {
+        position: absolute !important;
+        left: 0; top: 0; width: 100%;
+        background: white !important;
+        box-shadow: none !important;
+    }
+    .fixed.inset-0 {
+        position: static !important;
+        background: white !important;
+        padding: 0 !important;
+    }
 }

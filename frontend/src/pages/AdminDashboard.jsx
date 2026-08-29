@@ -1,13 +1,17 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { Navigate } from 'react-router-dom';
-import api from '../lib/api';
+import api, { API_BASE } from '../lib/api';
 import { useApp } from '../context/AppContext';
+import {
+  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend,
+} from 'recharts';
 import {
   TrendingUp, ShoppingBag, Truck, Package, Users, Trash2, X, Plus, Edit3, Save,
   Upload, ImageIcon, Minus, MapPin, ExternalLink, Lock, User as UserIcon,
+  Download, Printer, Bell, Layers,
 } from 'lucide-react';
 
-const tabs = ['Inventory', 'Orders', 'Revenue / Customers', 'Farmers', 'Staff', 'Account'];
+const tabs = ['Inventory', 'Orders', 'Revenue', 'Customers', 'Farmers', 'Categories', 'Staff', 'Account'];
 
 const StatCard = ({ icon: Icon, value, label }) => (
   <div className="bg-white rounded-2xl p-6 border border-[#E4D9C1] shadow-sm">
@@ -53,6 +57,7 @@ const fileToDataUrl = (file) => new Promise((resolve, reject) => {
 /* --------------- Offline Order Modal --------------- */
 const OfflineOrderModal = ({ open, onClose, onCreated, products }) => {
   const [customer, setCustomer] = useState({ name: '', phone: '', email: '' });
+  const [address, setAddress] = useState({ line1: '', line2: '', city: 'Hyderabad', pincode: '', landmark: '' });
   const [lines, setLines] = useState([]);
   const [payment, setPayment] = useState('cash');
   const [notes, setNotes] = useState('');
@@ -62,15 +67,47 @@ const OfflineOrderModal = ({ open, onClose, onCreated, products }) => {
   const [pastCustomers, setPastCustomers] = useState([]);
   const [custQuery, setCustQuery] = useState('');
   const [showSuggest, setShowSuggest] = useState(false);
+  const [phoneLookupMsg, setPhoneLookupMsg] = useState('');
 
   useEffect(() => {
     if (open) {
       api.get('/admin/offline-customers').then((r) => setPastCustomers(r.data || [])).catch(() => {});
     } else {
-      setCustomer({ name: '', phone: '', email: '' }); setLines([]); setPayment('cash'); setNotes(''); setCustomTotal(''); setError('');
-      setCustQuery(''); setShowSuggest(false);
+      setCustomer({ name: '', phone: '', email: '' });
+      setAddress({ line1: '', line2: '', city: 'Hyderabad', pincode: '', landmark: '' });
+      setLines([]); setPayment('cash'); setNotes(''); setCustomTotal(''); setError('');
+      setCustQuery(''); setShowSuggest(false); setPhoneLookupMsg('');
     }
   }, [open]);
+
+  // Auto-lookup by phone (debounced 500ms) — auto-fill saved details for returning offline customers
+  useEffect(() => {
+    if (!open) return;
+    const phone = customer.phone?.trim();
+    if (!phone || phone.length < 6) { setPhoneLookupMsg(''); return; }
+    const t = setTimeout(async () => {
+      try {
+        const r = await api.get(`/admin/customers/lookup?phone=${encodeURIComponent(phone)}`);
+        if (r.data && r.data.user_id) {
+          if (!customer.name) setCustomer((c) => ({ ...c, name: r.data.name || '', email: r.data.email && !r.data.email.includes('@retrofarms.offline') ? r.data.email : c.email }));
+          if (r.data.saved_address) {
+            const a = r.data.saved_address;
+            setAddress((prev) => ({
+              line1: prev.line1 || a.line1 || '',
+              line2: prev.line2 || a.line2 || '',
+              city: prev.city && prev.city !== 'Hyderabad' ? prev.city : (a.city || prev.city),
+              pincode: prev.pincode || a.pincode || '',
+              landmark: prev.landmark || a.landmark || '',
+            }));
+          }
+          setPhoneLookupMsg(`Returning customer — ${r.data.name || 'details'} auto-filled.`);
+        } else {
+          setPhoneLookupMsg('');
+        }
+      } catch {}
+    }, 500);
+    return () => clearTimeout(t);
+  }, [customer.phone, open]);
 
   if (!open) return null;
 
@@ -89,6 +126,13 @@ const OfflineOrderModal = ({ open, onClose, onCreated, products }) => {
 
   const pickPast = (c) => {
     setCustomer({ name: c.name || '', phone: c.phone || '', email: c.email && !c.email.includes('@retrofarms.offline') ? c.email : '' });
+    if (c.last_address) {
+      setAddress({
+        line1: c.last_address.line1 || '', line2: c.last_address.line2 || '',
+        city: c.last_address.city || 'Hyderabad', pincode: c.last_address.pincode || '',
+        landmark: c.last_address.landmark || '',
+      });
+    }
     setCustQuery(`${c.name || ''} · ${c.phone || ''}`);
     setShowSuggest(false);
   };
@@ -106,16 +150,24 @@ const OfflineOrderModal = ({ open, onClose, onCreated, products }) => {
     }
     setBusy(true);
     try {
+      const paymentStatus = payment === 'not_paid' ? 'Not Paid' : 'Paid';
+      const addressPayload = {
+        full_name: customer.name, phone: customer.phone,
+        line1: address.line1, line2: address.line2, city: address.city,
+        pincode: address.pincode, landmark: address.landmark,
+      };
       const r = await api.post('/admin/orders/offline', {
         customer_name: customer.name,
         customer_phone: customer.phone,
         customer_email: customer.email,
         items: lines.map((l) => ({ slug: l.slug, variant_id: l.variant_id, qty: parseInt(l.qty, 10) })),
+        address: addressPayload,
         payment_method: payment,
-        payment_status: 'Paid',
+        payment_status: paymentStatus,
         notes,
         status: 'Placed',
         total_override: hasCustomTotal ? parseInt(customTotal, 10) : null,
+        save_customer_address: true,
       });
       onCreated?.(r.data);
       onClose();
@@ -157,25 +209,32 @@ const OfflineOrderModal = ({ open, onClose, onCreated, products }) => {
                       <div className="text-xs text-[#7A6A55] flex flex-wrap gap-x-3">
                         {c.phone && <span>{c.phone}</span>}
                         {c.email && !c.email.includes('@retrofarms.offline') && <span>{c.email}</span>}
-                        {c.provider && <span className="uppercase tracking-widest">{c.provider}</span>}
                       </div>
                     </button>
                   ))}
                 </div>
               )}
-              {showSuggest && (
-                <button type="button" onClick={() => setShowSuggest(false)} className="absolute right-3 top-1/2 -translate-y-1/2 text-[#7A6A55] hover:text-[#2B1D11]">
-                  <X size={16} />
-                </button>
-              )}
             </div>
-            <div className="text-xs text-[#7A6A55] mt-1">Or fill in the fields below for a brand-new customer.</div>
+            <div className="text-xs text-[#7A6A55] mt-1">Or just type phone below — we'll auto-fill for returning customers.</div>
           </div>
 
           <div className="grid sm:grid-cols-3 gap-3">
             <input required value={customer.name} onChange={(e) => setCustomer((c) => ({ ...c, name: e.target.value }))} placeholder="Customer name*" className="px-4 py-3 border border-[#E4D9C1] rounded-xl focus:outline-none focus:border-[#2B1D11]" />
             <input required value={customer.phone} onChange={(e) => setCustomer((c) => ({ ...c, phone: e.target.value }))} placeholder="Phone*" className="px-4 py-3 border border-[#E4D9C1] rounded-xl focus:outline-none focus:border-[#2B1D11]" />
             <input value={customer.email} onChange={(e) => setCustomer((c) => ({ ...c, email: e.target.value }))} placeholder="Email (optional)" className="px-4 py-3 border border-[#E4D9C1] rounded-xl focus:outline-none focus:border-[#2B1D11]" />
+          </div>
+          {phoneLookupMsg && <div className="text-xs text-[#4E6A3C] -mt-3">{phoneLookupMsg}</div>}
+
+          <div>
+            <div className="text-xs text-[#7A6A55] uppercase tracking-widest mb-2">Address</div>
+            <div className="grid sm:grid-cols-2 gap-3">
+              <input value={address.line1} onChange={(e) => setAddress({ ...address, line1: e.target.value })} placeholder="Street / house no." className="sm:col-span-2 px-4 py-3 border border-[#E4D9C1] rounded-xl focus:outline-none focus:border-[#2B1D11]" />
+              <input value={address.line2} onChange={(e) => setAddress({ ...address, line2: e.target.value })} placeholder="Area / colony" className="px-4 py-3 border border-[#E4D9C1] rounded-xl focus:outline-none focus:border-[#2B1D11]" />
+              <input value={address.landmark} onChange={(e) => setAddress({ ...address, landmark: e.target.value })} placeholder="Landmark (optional)" className="px-4 py-3 border border-[#E4D9C1] rounded-xl focus:outline-none focus:border-[#2B1D11]" />
+              <input value={address.city} onChange={(e) => setAddress({ ...address, city: e.target.value })} placeholder="City" className="px-4 py-3 border border-[#E4D9C1] rounded-xl focus:outline-none focus:border-[#2B1D11]" />
+              <input value={address.pincode} onChange={(e) => setAddress({ ...address, pincode: e.target.value })} placeholder="Pincode" className="px-4 py-3 border border-[#E4D9C1] rounded-xl focus:outline-none focus:border-[#2B1D11]" />
+            </div>
+            <div className="text-xs text-[#7A6A55] mt-2">Address is saved to the customer profile and auto-filled next time this phone number is used.</div>
           </div>
 
           <div>
@@ -212,6 +271,7 @@ const OfflineOrderModal = ({ open, onClose, onCreated, products }) => {
               <option value="upi">UPI</option>
               <option value="bank">Bank transfer</option>
               <option value="cod">Cash on Delivery</option>
+              <option value="not_paid">Not Paid (due)</option>
               <option value="offline">Other (offline)</option>
             </select>
             <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Notes (optional)" className="px-4 py-3 border border-[#E4D9C1] rounded-xl focus:outline-none focus:border-[#2B1D11]" />
@@ -223,14 +283,8 @@ const OfflineOrderModal = ({ open, onClose, onCreated, products }) => {
               <label className="text-[#4B3826] text-sm">Final total (override — leave blank for auto)</label>
               <div className="flex items-center gap-2">
                 <span className="text-[#4B3826]">₹</span>
-                <input
-                  type="number"
-                  min="0"
-                  value={customTotal}
-                  onChange={(e) => setCustomTotal(e.target.value)}
-                  placeholder={String(subtotal + autoDelivery)}
-                  className="w-32 px-3 py-2 border border-[#E4D9C1] rounded-lg text-sm bg-white text-right"
-                />
+                <input type="number" min="0" value={customTotal} onChange={(e) => setCustomTotal(e.target.value)} placeholder={String(subtotal + autoDelivery)}
+                  className="w-32 px-3 py-2 border border-[#E4D9C1] rounded-lg text-sm bg-white text-right" />
               </div>
             </div>
             {!hasCustomTotal && (
@@ -592,6 +646,238 @@ const AccountForm = ({ user, onUpdated }) => {
   );
 };
 
+/* --------------- Revenue breakdown Panel --------------- */
+const RevenuePanel = () => {
+  const [view, setView] = useState('day');
+  const [start, setStart] = useState('');
+  const [end, setEnd] = useState('');
+  const [data, setData] = useState({ rows: [], summary: { total_revenue: 0, total_orders: 0, aov: 0 } });
+
+  const load = useCallback(async () => {
+    const params = new URLSearchParams({ view });
+    if (start) params.set('start', start);
+    if (end) params.set('end', end);
+    const r = await api.get(`/admin/revenue/breakdown?${params.toString()}`);
+    setData(r.data);
+  }, [view, start, end]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const downloadCsv = () => {
+    const header = ['Period', 'Revenue', 'Orders', 'Avg Order Value'];
+    const rows = data.rows.map((r) => [r.period, r.revenue, r.orders, r.aov]);
+    const csv = [header, ...rows].map((r) => r.join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `revenue_${view}.csv`;
+    a.click(); URL.revokeObjectURL(url);
+  };
+
+  const downloadXlsx = () => {
+    const params = new URLSearchParams();
+    if (start) params.set('start', start);
+    if (end) params.set('end', end);
+    window.open(`${API_BASE}/admin/orders/export.xlsx?${params.toString()}`, '_blank');
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="bg-white border border-[#E4D9C1] rounded-2xl p-6">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex gap-1 bg-[#F7F1E5] rounded-full p-1">
+            {['day', 'week', 'month', 'year'].map((v) => (
+              <button key={v} onClick={() => setView(v)}
+                className={`px-4 py-1.5 rounded-full text-sm capitalize ${view === v ? 'bg-[#2B1D11] text-white' : 'text-[#2B1D11]'}`}>
+                {v}
+              </button>
+            ))}
+          </div>
+          <input type="date" value={start} onChange={(e) => setStart(e.target.value)} className="px-3 py-2 border border-[#E4D9C1] rounded-lg text-sm" />
+          <span className="text-[#7A6A55]">to</span>
+          <input type="date" value={end} onChange={(e) => setEnd(e.target.value)} className="px-3 py-2 border border-[#E4D9C1] rounded-lg text-sm" />
+          <div className="flex-1" />
+          <button onClick={downloadCsv} className="inline-flex items-center gap-2 border border-[#4E6A3C] text-[#4E6A3C] hover:bg-[#4E6A3C] hover:text-white px-4 py-2 rounded-full text-sm">
+            <Download size={14} /> CSV
+          </button>
+          <button onClick={downloadXlsx} className="inline-flex items-center gap-2 bg-[#4E6A3C] hover:bg-[#3D5530] text-white px-4 py-2 rounded-full text-sm">
+            <Download size={14} /> Orders XLSX
+          </button>
+        </div>
+      </div>
+
+      <div className="grid md:grid-cols-3 gap-4">
+        <div className="bg-white border border-[#E4D9C1] rounded-2xl p-5">
+          <div className="text-xs uppercase tracking-widest text-[#7A6A55]">Total revenue</div>
+          <div className="font-serif text-3xl text-[#2B1D11] mt-2">₹{data.summary.total_revenue?.toLocaleString?.() || 0}</div>
+        </div>
+        <div className="bg-white border border-[#E4D9C1] rounded-2xl p-5">
+          <div className="text-xs uppercase tracking-widest text-[#7A6A55]">Paid orders</div>
+          <div className="font-serif text-3xl text-[#2B1D11] mt-2">{data.summary.total_orders}</div>
+        </div>
+        <div className="bg-white border border-[#E4D9C1] rounded-2xl p-5">
+          <div className="text-xs uppercase tracking-widest text-[#7A6A55]">Avg order value</div>
+          <div className="font-serif text-3xl text-[#2B1D11] mt-2">₹{data.summary.aov?.toLocaleString?.() || 0}</div>
+        </div>
+      </div>
+
+      <div className="bg-white border border-[#E4D9C1] rounded-2xl p-6">
+        <div className="text-xs uppercase tracking-widest text-[#7A6A55] mb-4">Revenue by {view}</div>
+        {data.rows.length === 0 ? (
+          <div className="py-16 text-center text-[#7A6A55]">No paid revenue in this range yet.</div>
+        ) : (
+          <div style={{ width: '100%', height: 320 }}>
+            <ResponsiveContainer>
+              <BarChart data={data.rows} margin={{ top: 10, right: 20, left: 0, bottom: 10 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#EFE4CB" />
+                <XAxis dataKey="period" stroke="#7A6A55" fontSize={12} />
+                <YAxis stroke="#7A6A55" fontSize={12} />
+                <Tooltip contentStyle={{ background: '#fff', border: '1px solid #E4D9C1', borderRadius: 8 }} />
+                <Legend />
+                <Bar dataKey="revenue" fill="#4E6A3C" name="Revenue (₹)" radius={[6, 6, 0, 0]} />
+                <Bar dataKey="orders" fill="#C96C1B" name="Orders" radius={[6, 6, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </div>
+
+      {data.rows.length > 0 && (
+        <div className="bg-white border border-[#E4D9C1] rounded-2xl overflow-x-auto">
+          <table className="w-full text-sm min-w-[500px]">
+            <thead>
+              <tr className="bg-[#EFE4CB] text-[#2B1D11]">
+                <th className="text-left px-6 py-3">Period</th>
+                <th className="text-right px-6 py-3">Revenue</th>
+                <th className="text-right px-6 py-3">Orders</th>
+                <th className="text-right px-6 py-3">AOV</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.rows.map((r) => (
+                <tr key={r.period} className="border-t border-[#EFE4CB]">
+                  <td className="px-6 py-3 text-[#2B1D11]">{r.period}</td>
+                  <td className="px-6 py-3 text-right font-serif text-[#2B1D11]">₹{r.revenue?.toLocaleString?.()}</td>
+                  <td className="px-6 py-3 text-right text-[#4B3826]">{r.orders}</td>
+                  <td className="px-6 py-3 text-right text-[#4B3826]">₹{r.aov?.toLocaleString?.()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+};
+
+/* --------------- Categories Panel --------------- */
+const CategoriesPanel = ({ isAdmin }) => {
+  const [cats, setCats] = useState([]);
+  const [products, setProducts] = useState([]);
+  const [newCat, setNewCat] = useState({ id: '', label: '' });
+  const [editing, setEditing] = useState(null);
+  const [error, setError] = useState('');
+
+  const load = () => {
+    api.get('/categories').then((r) => setCats(r.data));
+    api.get('/products').then((r) => setProducts(r.data));
+  };
+  useEffect(load, []);
+
+  const productsInCat = (cid) => products.filter((p) => p.category === cid).length;
+
+  const add = async (e) => {
+    e.preventDefault(); setError('');
+    try {
+      const cid = newCat.id.trim().toLowerCase().replace(/\s+/g, '-') || newCat.label.trim().toLowerCase().replace(/\s+/g, '-');
+      await api.post('/admin/categories', { id: cid, label: newCat.label.trim() });
+      setNewCat({ id: '', label: '' }); load();
+    } catch (err) { setError(err.response?.data?.detail || 'Failed'); }
+  };
+
+  const save = async (c) => {
+    try { await api.patch(`/admin/categories/${c.id}`, { label: editing.label, order: parseInt(editing.order || 0, 10) }); setEditing(null); load(); }
+    catch (err) { alert(err.response?.data?.detail || 'Failed'); }
+  };
+
+  const remove = async (c) => {
+    const count = productsInCat(c.id);
+    if (count > 0) {
+      const others = cats.filter((x) => x.id !== c.id);
+      const target = window.prompt(`${count} product(s) still use "${c.label}". Type the ID of another category to move them into (options: ${others.map((x) => x.id).join(', ')}), or leave blank to cancel:`);
+      if (!target) return;
+      try { await api.delete(`/admin/categories/${c.id}?reassign_to=${encodeURIComponent(target)}`); load(); }
+      catch (e) { alert(e.response?.data?.detail || 'Failed'); }
+    } else {
+      if (!window.confirm(`Delete category "${c.label}"?`)) return;
+      try { await api.delete(`/admin/categories/${c.id}`); load(); }
+      catch (e) { alert(e.response?.data?.detail || 'Failed'); }
+    }
+  };
+
+  return (
+    <div className="grid lg:grid-cols-3 gap-6">
+      <div className="lg:col-span-2 bg-white rounded-2xl border border-[#E4D9C1] overflow-x-auto">
+        <table className="w-full text-sm min-w-[500px]">
+          <thead>
+            <tr className="bg-[#EFE4CB] text-[#2B1D11]">
+              <th className="text-left px-6 py-4">ID</th>
+              <th className="text-left px-6 py-4">Label</th>
+              <th className="text-left px-6 py-4">Order</th>
+              <th className="text-left px-6 py-4">Products</th>
+              <th className="text-left px-6 py-4"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {cats.map((c) => (
+              <tr key={c.id} className="border-t border-[#EFE4CB]">
+                <td className="px-6 py-3 text-[#2B1D11] font-mono text-xs">{c.id}</td>
+                <td className="px-6 py-3 text-[#2B1D11]">
+                  {editing?.id === c.id ? (
+                    <input value={editing.label} onChange={(e) => setEditing({ ...editing, label: e.target.value })} className="px-2 py-1 border border-[#E4D9C1] rounded" />
+                  ) : c.label}
+                </td>
+                <td className="px-6 py-3 text-[#4B3826]">
+                  {editing?.id === c.id ? (
+                    <input type="number" value={editing.order} onChange={(e) => setEditing({ ...editing, order: e.target.value })} className="w-16 px-2 py-1 border border-[#E4D9C1] rounded" />
+                  ) : c.order}
+                </td>
+                <td className="px-6 py-3 text-[#4E6A3C]">{productsInCat(c.id)}</td>
+                <td className="px-6 py-3 text-right">
+                  {isAdmin && (
+                    editing?.id === c.id ? (
+                      <div className="flex gap-2 justify-end">
+                        <button onClick={() => save(c)} className="text-[#4E6A3C] hover:text-[#3D5530]"><Save size={16} /></button>
+                        <button onClick={() => setEditing(null)} className="text-[#7A6A55]"><X size={16} /></button>
+                      </div>
+                    ) : (
+                      <div className="flex gap-2 justify-end">
+                        <button onClick={() => setEditing({ ...c })} className="text-[#2B1D11]"><Edit3 size={16} /></button>
+                        <button onClick={() => remove(c)} className="text-red-500 hover:text-red-700"><Trash2 size={16} /></button>
+                      </div>
+                    )
+                  )}
+                </td>
+              </tr>
+            ))}
+            {cats.length === 0 && <tr><td colSpan={5} className="px-6 py-10 text-center text-[#7A6A55]">No categories yet.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+
+      {isAdmin && (
+        <form onSubmit={add} className="bg-white rounded-2xl border border-[#E4D9C1] p-6">
+          <h3 className="font-serif text-2xl text-[#2B1D11] mb-4">Add category</h3>
+          <input value={newCat.label} onChange={(e) => setNewCat({ ...newCat, label: e.target.value })} placeholder="Label (e.g. Mutton)" required className="w-full px-4 py-3 border border-[#E4D9C1] rounded-xl mb-3 focus:outline-none focus:border-[#2B1D11]" />
+          <input value={newCat.id} onChange={(e) => setNewCat({ ...newCat, id: e.target.value })} placeholder="id (optional — auto-generated)" className="w-full px-4 py-3 border border-[#E4D9C1] rounded-xl mb-3 focus:outline-none focus:border-[#2B1D11]" />
+          {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
+          <button className="w-full bg-[#4E6A3C] hover:bg-[#3D5530] text-white rounded-full py-3">Add category</button>
+        </form>
+      )}
+    </div>
+  );
+};
+
 /* --------------- Main Dashboard --------------- */
 const AdminDashboard = () => {
   const { user, setUser, authLoading } = useApp();
@@ -625,6 +911,41 @@ const AdminDashboard = () => {
     } catch (e) { /* ignore */ }
   }, []);
 
+  // Polling for new orders to show notification toast
+  const seenOrderIds = useRef(new Set());
+  const initialLoad = useRef(true);
+  const [toast, setToast] = useState(null);
+  useEffect(() => {
+    if (!user || (user.role !== 'admin' && user.role !== 'staff')) return;
+    const check = async () => {
+      try {
+        const r = await api.get('/admin/orders?limit=20');
+        if (initialLoad.current) {
+          r.data.forEach((o) => seenOrderIds.current.add(o.order_id));
+          initialLoad.current = false;
+          return;
+        }
+        const newest = r.data.find((o) => !seenOrderIds.current.has(o.order_id));
+        if (newest) {
+          r.data.forEach((o) => seenOrderIds.current.add(o.order_id));
+          setToast(newest);
+          // Play a subtle beep via Web Audio API
+          try {
+            const ctx = new (window.AudioContext || window.webkitAudioContext)();
+            const o = ctx.createOscillator(); const g = ctx.createGain();
+            o.type = 'sine'; o.frequency.value = 660; g.gain.value = 0.05;
+            o.connect(g); g.connect(ctx.destination); o.start();
+            setTimeout(() => { o.stop(); ctx.close(); }, 220);
+          } catch {}
+          setOrders(r.data);
+          reload();
+        }
+      } catch {}
+    };
+    const id = setInterval(check, 15000);
+    return () => clearInterval(id);
+  }, [user, reload]);
+
   useEffect(() => { if (user && (user.role === 'admin' || user.role === 'staff')) reload(); }, [user, reload]);
 
   if (authLoading) return <div className="bg-[#F7F1E5] min-h-screen flex items-center justify-center">Loading…</div>;
@@ -632,7 +953,9 @@ const AdminDashboard = () => {
   if (user.role !== 'admin' && user.role !== 'staff') return <Navigate to="/" replace />;
 
   const isAdmin = user.role === 'admin';
-  const filteredOrders = orderFilter === 'All' ? orders : orders.filter((o) => o.status === orderFilter);
+  const filteredOrders = orderFilter === 'All' ? orders
+    : orderFilter === 'Not Paid' ? orders.filter((o) => (o.payment_method === 'not_paid') || (o.payment_status && ['Pending', 'Not Paid', 'Cod Pending'].includes(o.payment_status)))
+    : orders.filter((o) => o.status === orderFilter);
 
   const updateStock = async (slug, variantId, newStock) => {
     await api.patch(`/admin/products/${slug}/variants/${variantId}/stock`, { stock: newStock });
@@ -752,11 +1075,17 @@ const AdminDashboard = () => {
 
         {activeTab === 'Orders' && (
           <div>
-            <div className="flex flex-wrap gap-2 mb-4">
-              {['All', ...ORDER_STATUSES].map((s) => (
-                <button key={s} onClick={() => setOrderFilter(s)}
-                  className={`px-4 py-2 rounded-full text-sm transition-colors ${orderFilter === s ? 'bg-[#4E6A3C] text-white' : 'bg-white border border-[#E4D9C1] text-[#2B1D11] hover:border-[#2B1D11]'}`}>{s}</button>
-              ))}
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+              <div className="flex flex-wrap gap-2">
+                {['All', 'Not Paid', ...ORDER_STATUSES].map((s) => (
+                  <button key={s} onClick={() => setOrderFilter(s)}
+                    className={`px-4 py-2 rounded-full text-sm transition-colors ${orderFilter === s ? 'bg-[#4E6A3C] text-white' : 'bg-white border border-[#E4D9C1] text-[#2B1D11] hover:border-[#2B1D11]'}`}>{s}</button>
+                ))}
+              </div>
+              <a href={`${API_BASE}/admin/orders/export.xlsx`} target="_blank" rel="noreferrer"
+                 className="inline-flex items-center gap-2 bg-[#4E6A3C] hover:bg-[#3D5530] text-white px-4 py-2 rounded-full text-sm">
+                <Download size={14} /> Download as Excel
+              </a>
             </div>
             <div className="bg-white rounded-2xl border border-[#E4D9C1] overflow-x-auto">
               <table className="w-full text-sm min-w-[1200px]">
@@ -824,7 +1153,11 @@ const AdminDashboard = () => {
           </div>
         )}
 
-        {activeTab === 'Revenue / Customers' && (
+        {activeTab === 'Revenue' && <RevenuePanel />}
+
+        {activeTab === 'Categories' && <CategoriesPanel isAdmin={isAdmin} />}
+
+        {activeTab === 'Customers' && (
           <div className="bg-white rounded-2xl border border-[#E4D9C1] overflow-x-auto">
             <div className="px-6 pt-5 pb-3 text-xs text-[#7A6A55]">
               Sorted by revenue. Click any customer row (or the orders count) to see their full order history.
@@ -970,16 +1303,21 @@ const AdminDashboard = () => {
         )}
 
         {invoiceOrder && (
-          <div className="fixed inset-0 bg-black/50 z-50 flex items-start md:items-center justify-center p-4 overflow-y-auto" onClick={() => setInvoiceOrder(null)}>
-            <div className="bg-white rounded-2xl max-w-3xl w-full my-10" onClick={(e) => e.stopPropagation()}>
-              <div className="p-8">
+          <div className="fixed inset-0 bg-black/50 z-50 flex items-start md:items-center justify-center p-4 overflow-y-auto print:static print:bg-transparent print:p-0" onClick={() => setInvoiceOrder(null)}>
+            <div className="bg-white rounded-2xl max-w-3xl w-full my-10 print:my-0 print:max-w-full print:rounded-none print:shadow-none" onClick={(e) => e.stopPropagation()} id="invoice-print-area">
+              <div className="p-8 print:p-6">
                 <div className="flex justify-between items-start mb-6">
                   <div>
-                    <div className="text-xs text-[#7A6A55] uppercase tracking-widest">Invoice</div>
+                    <div className="text-xs text-[#7A6A55] uppercase tracking-widest">Retro Farms · Invoice</div>
                     <div className="font-serif text-2xl text-[#2B1D11]">#{invoiceOrder.order_id}</div>
                     <div className="text-xs text-[#7A6A55]">{invoiceOrder.created_at ? new Date(invoiceOrder.created_at).toLocaleString('en-IN') : ''}</div>
                   </div>
-                  <button onClick={() => setInvoiceOrder(null)} className="text-[#7A6A55] hover:text-[#2B1D11]"><X size={22} /></button>
+                  <div className="flex items-center gap-2 print:hidden">
+                    <button onClick={() => window.print()} className="inline-flex items-center gap-2 border border-[#E4D9C1] hover:border-[#2B1D11] text-[#2B1D11] px-4 py-2 rounded-full text-sm">
+                      <Printer size={14} /> Print
+                    </button>
+                    <button onClick={() => setInvoiceOrder(null)} className="text-[#7A6A55] hover:text-[#2B1D11]"><X size={22} /></button>
+                  </div>
                 </div>
                 <div className="grid sm:grid-cols-2 gap-6 mb-6">
                   <div>
@@ -993,6 +1331,7 @@ const AdminDashboard = () => {
                     <div className="text-sm text-[#4B3826]">
                       {invoiceOrder.address?.line1}{invoiceOrder.address?.line2 ? `, ${invoiceOrder.address.line2}` : ''}<br />
                       {invoiceOrder.address?.city} — {invoiceOrder.address?.pincode}
+                      {invoiceOrder.address?.landmark ? <><br />Landmark: {invoiceOrder.address.landmark}</> : null}
                     </div>
                   </div>
                 </div>
@@ -1005,8 +1344,18 @@ const AdminDashboard = () => {
                   </thead>
                   <tbody>
                     {(invoiceOrder.items || []).map((i, idx) => (
-                      <tr key={idx} className="border-b border-[#EFE4CB]">
-                        <td className="py-2 text-[#2B1D11]">{i.name}</td>
+                      <tr key={idx} className="border-b border-[#EFE4CB] align-top">
+                        <td className="py-2 text-[#2B1D11]">
+                          {i.name}
+                          {i.options && (
+                            <div className="text-xs text-[#4E6A3C] mt-1">
+                              {i.options.bird_type && <div>Bird: {i.options.bird_type}</div>}
+                              {i.options.piece_size && <div>Cut: {i.options.piece_size}</div>}
+                              {i.options.delivery_date && <div>Delivery: {i.options.delivery_date}</div>}
+                              {i.options.instructions && <div>Notes: {i.options.instructions}</div>}
+                            </div>
+                          )}
+                        </td>
                         <td className="py-2 text-[#4B3826]">{i.variant_label}</td>
                         <td className="py-2 text-right text-[#4B3826]">{i.qty}</td>
                         <td className="py-2 text-right text-[#4B3826]">₹{i.price}</td>
@@ -1024,6 +1373,27 @@ const AdminDashboard = () => {
                   <div className="text-xs text-[#7A6A55] text-right">Status: {invoiceOrder.status}</div>
                   {invoiceOrder.assigned_staff_name && <div className="text-xs text-[#7A6A55] text-right">Assigned: {invoiceOrder.assigned_staff_name}</div>}
                   {invoiceOrder.notes && <div className="text-xs text-[#7A6A55] mt-2 text-right">Notes: {invoiceOrder.notes}</div>}
+                </div>
+                <div className="mt-8 pt-6 border-t border-[#EFE4CB] text-center text-xs text-[#7A6A55] print:block hidden">
+                  Thank you for choosing Retro Farms · retrofarms.in · +91 80195 92049
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {toast && (
+          <div className="fixed bottom-6 right-6 z-[60] bg-white border-l-4 border-[#4E6A3C] shadow-2xl rounded-xl p-4 max-w-sm animate-[fadeUp_.3s_ease-out]">
+            <div className="flex items-start gap-3">
+              <div className="w-9 h-9 rounded-full bg-[#DDECD1] text-[#4E6A3C] flex items-center justify-center flex-shrink-0"><Bell size={18} /></div>
+              <div className="flex-1 min-w-0">
+                <div className="text-xs uppercase tracking-widest text-[#4E6A3C] mb-1">New order</div>
+                <div className="font-serif text-lg text-[#2B1D11] leading-tight">#{toast.order_id} · ₹{toast.total}</div>
+                <div className="text-sm text-[#4B3826] truncate">{toast.customer_name || toast.customer_email}</div>
+                <div className="mt-2 flex gap-2">
+                  <button onClick={() => { openInvoice(toast.order_id); setToast(null); }}
+                    className="text-xs bg-[#2B1D11] hover:bg-[#3A2818] text-white px-3 py-1.5 rounded-full">Open invoice</button>
+                  <button onClick={() => setToast(null)} className="text-xs text-[#7A6A55] px-3 py-1.5">Dismiss</button>
                 </div>
               </div>
             </div>

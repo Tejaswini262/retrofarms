@@ -55,7 +55,7 @@ const Checkout = () => {
     }
     setPlacing(true);
     try {
-      const items = cart.map((c) => ({ slug: c.slug, variant_id: c.variantId, qty: c.qty }));
+      const items = cart.map((c) => ({ slug: c.slug, variant_id: c.variantId, qty: c.qty, options: c.options || null }));
       const addr = geo ? { ...address, lat: geo.lat, lng: geo.lng } : address;
       const r = await api.post('/orders/create', {
         items, address: addr, payment_method: payment,

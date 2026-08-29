@@ -30,14 +30,17 @@ export const AppProvider = ({ children }) => {
     checkAuth();
   }, [checkAuth]);
 
-  const addToCart = (product, variant, qty = 1) => {
+  const addToCart = (product, variant, qty = 1, options = null) => {
     setCart((prev) => {
-      const key = `${product.slug}_${variant.id}`;
+      // Chicken items with options are unique per set of options
+      const optKey = options ? JSON.stringify(options) : '';
+      const key = `${product.slug}_${variant.id}${optKey ? '_' + btoa(unescape(encodeURIComponent(optKey))).slice(0, 8) : ''}`;
       const existing = prev.find((c) => c.key === key);
       if (existing) return prev.map((c) => (c.key === key ? { ...c, qty: c.qty + qty } : c));
       return [...prev, {
         key, slug: product.slug, name: product.name, image: product.image,
         variantId: variant.id, variantLabel: variant.label, price: variant.price, qty,
+        options: options || undefined,
       }];
     });
   };
