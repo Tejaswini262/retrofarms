@@ -11,7 +11,7 @@ import {
   Download, Printer, Bell, Layers,
 } from 'lucide-react';
 
-const tabs = ['Inventory', 'Orders', 'Revenue', 'Customers', 'Farmers', 'Categories', 'Staff', 'Account'];
+const tabs = ['Inventory', 'Orders', 'Revenue', 'Customers', 'Feedback', 'Farmers', 'Categories', 'Staff', 'Account'];
 
 const StatCard = ({ icon: Icon, value, label }) => (
   <div className="bg-white rounded-2xl p-6 border border-[#E4D9C1] shadow-sm">
@@ -878,6 +878,97 @@ const CategoriesPanel = ({ isAdmin }) => {
   );
 };
 
+/* --------------- Feedback Panel --------------- */
+const FeedbackPanel = () => {
+  const [items, setItems] = useState([]);
+  const [filter, setFilter] = useState('all');
+  const [respondingId, setRespondingId] = useState(null);
+  const [responseText, setResponseText] = useState('');
+
+  const load = async () => {
+    const q = filter === 'all' ? '' : `?status=${filter}`;
+    const r = await api.get(`/admin/feedback${q}`);
+    setItems(r.data);
+  };
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [filter]);
+
+  const setStatus = async (fb, status) => {
+    try { await api.patch(`/admin/feedback/${fb.feedback_id}`, { status }); load(); }
+    catch (e) { alert(e.response?.data?.detail || 'Failed'); }
+  };
+  const saveResponse = async (fb) => {
+    try { await api.patch(`/admin/feedback/${fb.feedback_id}`, { admin_response: responseText }); setRespondingId(null); setResponseText(''); load(); }
+    catch (e) { alert(e.response?.data?.detail || 'Failed'); }
+  };
+
+  const statusBadge = (s) => {
+    const map = { active: 'bg-[#DDECD1] text-[#4E6A3C]', flagged: 'bg-[#FCE9D0] text-[#C96C1B]', hidden: 'bg-red-100 text-red-700' };
+    return <span className={`px-2 py-0.5 rounded-full text-xs ${map[s] || 'bg-[#EFE4CB] text-[#2B1D11]'}`}>{s}</span>;
+  };
+  const stars = (n) => (
+    <span className="inline-flex gap-0.5">
+      {[1, 2, 3, 4, 5].map((i) => (
+        <span key={i} className={i <= n ? 'text-[#F0B849]' : 'text-[#D9CBAF]'}>★</span>
+      ))}
+    </span>
+  );
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap gap-2">
+        {['all', 'active', 'flagged', 'hidden'].map((f) => (
+          <button key={f} onClick={() => setFilter(f)}
+            className={`px-4 py-1.5 rounded-full text-sm capitalize ${filter === f ? 'bg-[#2B1D11] text-white' : 'bg-white border border-[#E4D9C1] text-[#2B1D11]'}`}>
+            {f}
+          </button>
+        ))}
+      </div>
+      {items.length === 0 ? (
+        <div className="bg-white border border-[#E4D9C1] rounded-2xl p-14 text-center text-[#7A6A55]">No feedback in this view.</div>
+      ) : items.map((fb) => (
+        <div key={fb.feedback_id} className="bg-white border border-[#E4D9C1] rounded-2xl p-6">
+          <div className="flex flex-wrap justify-between items-start gap-4">
+            <div className="flex-1">
+              <div className="flex items-center gap-3 mb-2">
+                {stars(fb.rating)}
+                {statusBadge(fb.status)}
+                {fb.flags?.length > 0 && fb.flags.map((f) => (
+                  <span key={f} className="text-[10px] uppercase tracking-widest bg-red-50 text-red-700 px-2 py-0.5 rounded-full">{f.replace(/_/g, ' ')}</span>
+                ))}
+              </div>
+              <div className="text-[#2B1D11]">{fb.comment || <em className="text-[#7A6A55]">(no comment)</em>}</div>
+              <div className="text-xs text-[#7A6A55] mt-2">
+                {fb.customer_name || fb.customer_email} · Order <span className="font-mono">#{fb.order_id}</span> · {new Date(fb.created_at).toLocaleString('en-IN')}
+                {fb.edit_count > 0 && <> · edited {fb.edit_count}×</>}
+              </div>
+              {fb.admin_response && (
+                <div className="mt-3 pl-4 border-l-2 border-[#4E6A3C] text-sm text-[#4B3826]">
+                  <div className="text-xs uppercase tracking-widest text-[#4E6A3C] mb-1">Farm reply</div>
+                  {fb.admin_response}
+                </div>
+              )}
+              {respondingId === fb.feedback_id && (
+                <div className="mt-3 flex gap-2">
+                  <input value={responseText} onChange={(e) => setResponseText(e.target.value)} placeholder="Write a public reply…"
+                    className="flex-1 px-3 py-2 border border-[#E4D9C1] rounded-lg text-sm" />
+                  <button onClick={() => saveResponse(fb)} className="bg-[#4E6A3C] text-white px-4 py-2 rounded-full text-sm">Save</button>
+                  <button onClick={() => { setRespondingId(null); setResponseText(''); }} className="text-[#7A6A55] px-3">Cancel</button>
+                </div>
+              )}
+            </div>
+            <div className="flex flex-col gap-1 items-end">
+              {fb.status !== 'active' && <button onClick={() => setStatus(fb, 'active')} className="text-xs text-[#4E6A3C] hover:underline">Approve</button>}
+              {fb.status !== 'flagged' && <button onClick={() => setStatus(fb, 'flagged')} className="text-xs text-[#C96C1B] hover:underline">Flag</button>}
+              {fb.status !== 'hidden' && <button onClick={() => setStatus(fb, 'hidden')} className="text-xs text-red-600 hover:underline">Hide</button>}
+              <button onClick={() => { setRespondingId(fb.feedback_id); setResponseText(fb.admin_response || ''); }} className="text-xs text-[#2B1D11] hover:underline mt-2">Respond</button>
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+};
+
 /* --------------- Main Dashboard --------------- */
 const AdminDashboard = () => {
   const { user, setUser, authLoading } = useApp();
@@ -1154,6 +1245,8 @@ const AdminDashboard = () => {
         )}
 
         {activeTab === 'Revenue' && <RevenuePanel />}
+
+        {activeTab === 'Feedback' && <FeedbackPanel />}
 
         {activeTab === 'Categories' && <CategoriesPanel isAdmin={isAdmin} />}
 

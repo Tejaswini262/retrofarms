@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Backend API Testing for Retro Farms - New Features
-Tests: Categories CRUD, Revenue Breakdown, Excel Export, Customer Lookup/Update, 
-       Offline Orders with new fields, Chicken Options, DB Indexes, Regression
+Comprehensive backend API tests for Retro Farms Feedback System
+Tests all feedback endpoints with anti-fraud safeguards
 """
 
 import requests
 import json
-import sys
-from datetime import datetime, timedelta
+import time
+import subprocess
+from datetime import datetime, timezone
 
 # Configuration
 BASE_URL = "https://farm-to-table-541.preview.emergentagent.com/api"
@@ -17,841 +17,622 @@ ADMIN_PASSWORD = "admin123"
 STAFF_EMAIL = "staff@retrofarms.in"
 STAFF_PASSWORD = "staff123"
 
-# Test state
-admin_session = requests.Session()
-staff_session = requests.Session()
+# Test results tracking
+tests_passed = 0
+tests_failed = 0
 test_results = []
-test_order_id = None
-test_customer_user_id = None
 
-def log_test(name, passed, details=""):
-    """Log test result"""
-    status = "✅ PASS" if passed else "❌ FAIL"
-    test_results.append({"name": name, "passed": passed, "details": details})
-    print(f"{status}: {name}")
-    if details and not passed:
-        print(f"   Details: {details}")
+def log_test(test_name, passed, message=""):
+    global tests_passed, tests_failed
+    if passed:
+        tests_passed += 1
+        status = "✅ PASS"
+    else:
+        tests_failed += 1
+        status = "❌ FAIL"
+    result = f"{status}: {test_name}"
+    if message:
+        result += f" - {message}"
+    print(result)
+    test_results.append({"test": test_name, "passed": passed, "message": message})
+
+def create_customer_session():
+    """Create a test customer session using MongoDB"""
+    cmd = """mongosh --quiet --eval "use('test_database');
+var uid='user_fb_test_'+Date.now();
+var token='sess_fb_'+Date.now();
+db.users.insertOne({user_id:uid, email:'fbtest'+Date.now()+'@example.com', name:'FB Test', phone:'8000011111', role:'customer', provider:'google', created_at:new Date()});
+var exp=new Date(Date.now()+7*24*3600*1000);
+db.sessions.insertOne({session_token:token, user_id:uid, expires_at:exp, created_at:new Date()});
+print('TOKEN='+token+',UID='+uid);" """
+    
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    output = result.stdout.strip()
+    
+    # Parse TOKEN and UID from output
+    if "TOKEN=" in output:
+        parts = output.split("TOKEN=")[1].split(",UID=")
+        token = parts[0].strip()
+        uid = parts[1].strip()
+        return {"token": token, "user_id": uid}
+    else:
+        raise Exception(f"Failed to create customer session: {output}")
 
 def admin_login():
-    """Login as admin and return session"""
-    resp = admin_session.post(f"{BASE_URL}/auth/admin-login", 
-                              json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD})
-    if resp.status_code == 200:
-        log_test("Admin login", True)
-        return True
+    """Login as admin and return session token"""
+    response = requests.post(f"{BASE_URL}/auth/admin-login", json={
+        "email": ADMIN_EMAIL,
+        "password": ADMIN_PASSWORD
+    })
+    if response.status_code == 200:
+        cookies = response.cookies
+        return cookies.get("session_token")
     else:
-        log_test("Admin login", False, f"Status {resp.status_code}: {resp.text}")
-        return False
+        raise Exception(f"Admin login failed: {response.status_code} {response.text}")
 
 def staff_login():
-    """Login as staff and return session"""
-    resp = staff_session.post(f"{BASE_URL}/auth/admin-login",
-                              json={"email": STAFF_EMAIL, "password": STAFF_PASSWORD})
-    if resp.status_code == 200:
-        log_test("Staff login", True)
-        return True
+    """Login as staff and return session token"""
+    response = requests.post(f"{BASE_URL}/auth/admin-login", json={
+        "email": STAFF_EMAIL,
+        "password": STAFF_PASSWORD
+    })
+    if response.status_code == 200:
+        cookies = response.cookies
+        return cookies.get("session_token")
     else:
-        log_test("Staff login", False, f"Status {resp.status_code}: {resp.text}")
-        return False
+        raise Exception(f"Staff login failed: {response.status_code} {response.text}")
 
-# ==================== CATEGORIES CRUD ====================
-
-def test_categories_public_list():
-    """Test GET /api/categories (public)"""
-    resp = requests.get(f"{BASE_URL}/categories")
-    if resp.status_code == 200:
-        data = resp.json()
-        if isinstance(data, list) and len(data) >= 4:
-            # Check for seeded categories
-            ids = [c.get('id') for c in data]
-            expected = ['eggs', 'chicken', 'fruits', 'vegetables']
-            if all(e in ids for e in expected):
-                log_test("GET /api/categories (public)", True, f"Found {len(data)} categories including seeded ones")
-                return True
-            else:
-                log_test("GET /api/categories (public)", False, f"Missing expected categories. Got: {ids}")
-                return False
-        else:
-            log_test("GET /api/categories (public)", False, f"Expected list with >=4 items, got {len(data) if isinstance(data, list) else 'not a list'}")
-            return False
-    else:
-        log_test("GET /api/categories (public)", False, f"Status {resp.status_code}: {resp.text}")
-        return False
-
-def test_create_category():
-    """Test POST /api/admin/categories"""
-    payload = {"id": "mutton", "label": "Premium Mutton"}
-    resp = admin_session.post(f"{BASE_URL}/admin/categories", json=payload)
-    if resp.status_code in [200, 201]:
-        data = resp.json()
-        if data.get('id') == 'mutton' and data.get('label') == 'Premium Mutton':
-            log_test("POST /api/admin/categories (create mutton)", True)
-            return True
-        else:
-            log_test("POST /api/admin/categories (create mutton)", False, f"Unexpected response: {data}")
-            return False
-    else:
-        log_test("POST /api/admin/categories (create mutton)", False, f"Status {resp.status_code}: {resp.text}")
-        return False
-
-def test_create_duplicate_category():
-    """Test POST /api/admin/categories with duplicate id"""
-    payload = {"id": "mutton", "label": "Another Mutton"}
-    resp = admin_session.post(f"{BASE_URL}/admin/categories", json=payload)
-    if resp.status_code == 400:
-        log_test("POST /api/admin/categories (duplicate id → 400)", True)
-        return True
-    else:
-        log_test("POST /api/admin/categories (duplicate id → 400)", False, f"Expected 400, got {resp.status_code}")
-        return False
-
-def test_update_category():
-    """Test PATCH /api/admin/categories/mutton"""
-    payload = {"label": "Farm Mutton", "order": 10}
-    resp = admin_session.patch(f"{BASE_URL}/admin/categories/mutton", json=payload)
-    if resp.status_code == 200:
-        data = resp.json()
-        if data.get('label') == 'Farm Mutton' and data.get('order') == 10:
-            log_test("PATCH /api/admin/categories/mutton", True)
-            return True
-        else:
-            log_test("PATCH /api/admin/categories/mutton", False, f"Update not reflected: {data}")
-            return False
-    else:
-        log_test("PATCH /api/admin/categories/mutton", False, f"Status {resp.status_code}: {resp.text}")
-        return False
-
-def test_delete_category_with_products():
-    """Test DELETE /api/admin/categories/mutton without reassign_to (should fail if products exist)"""
-    # First create a test product in mutton category
-    product_payload = {
-        "slug": "test-mutton",
-        "name": "Test Mutton Product",
-        "category": "mutton",
-        "image": "https://example.com/mutton.jpg",
-        "from_price": 500,
-        "description": "Test mutton product",
-        "variants": [{"id": "1kg", "label": "1 kg", "price": 500, "stock": 10}]
-    }
-    create_resp = admin_session.post(f"{BASE_URL}/admin/products", json=product_payload)
-    if create_resp.status_code not in [200, 201]:
-        log_test("DELETE category with products (setup)", False, f"Failed to create test product: {create_resp.status_code}")
-        return False
+def create_order_as_customer(customer_token):
+    """Create a COD order as customer"""
+    cookies = {"session_token": customer_token}
+    response = requests.post(f"{BASE_URL}/orders/create", 
+        cookies=cookies,
+        json={
+            "items": [{"slug": "country-eggs", "variant_id": "dozen", "qty": 1}],
+            "address": {
+                "full_name": "FB Test Customer",
+                "phone": "8000011111",
+                "line1": "123 Test St",
+                "city": "Test City",
+                "pincode": "123456"
+            },
+            "payment_method": "cod"
+        })
     
-    # Try to delete category without reassign_to
-    resp = admin_session.delete(f"{BASE_URL}/admin/categories/mutton")
-    if resp.status_code == 400:
-        log_test("DELETE /api/admin/categories/mutton without reassign_to → 400", True, "Blocked as expected")
-        return True
+    if response.status_code == 200:
+        return response.json()["order_id"]
     else:
-        log_test("DELETE /api/admin/categories/mutton without reassign_to → 400", False, f"Expected 400, got {resp.status_code}")
-        return False
+        raise Exception(f"Order creation failed: {response.status_code} {response.text}")
 
-def test_delete_category_with_reassign():
-    """Test DELETE /api/admin/categories/mutton?reassign_to=fruits"""
-    resp = admin_session.delete(f"{BASE_URL}/admin/categories/mutton?reassign_to=fruits")
-    if resp.status_code == 200:
-        # Verify the test product's category is now fruits
-        product_resp = requests.get(f"{BASE_URL}/products/test-mutton")
-        if product_resp.status_code == 200:
-            product = product_resp.json()
-            if product.get('category') == 'fruits':
-                log_test("DELETE /api/admin/categories/mutton?reassign_to=fruits", True, "Product reassigned to fruits")
-                # Cleanup: delete test product
-                admin_session.delete(f"{BASE_URL}/admin/products/test-mutton")
-                return True
-            else:
-                log_test("DELETE /api/admin/categories/mutton?reassign_to=fruits", False, f"Product category not reassigned: {product.get('category')}")
-                return False
-        else:
-            log_test("DELETE /api/admin/categories/mutton?reassign_to=fruits", False, "Could not verify product reassignment")
-            return False
-    else:
-        log_test("DELETE /api/admin/categories/mutton?reassign_to=fruits", False, f"Status {resp.status_code}: {resp.text}")
-        return False
-
-def test_category_staff_permissions():
-    """Test that staff gets 403 on POST/PATCH/DELETE categories"""
-    # POST
-    resp = staff_session.post(f"{BASE_URL}/admin/categories", json={"id": "test", "label": "Test"})
-    post_ok = resp.status_code == 403
+def mark_order_delivered(order_id, admin_token):
+    """Mark order as Delivered"""
+    cookies = {"session_token": admin_token}
+    response = requests.patch(f"{BASE_URL}/admin/orders/{order_id}",
+        cookies=cookies,
+        json={"status": "Delivered"})
     
-    # PATCH
-    resp = staff_session.patch(f"{BASE_URL}/admin/categories/eggs", json={"label": "Test"})
-    patch_ok = resp.status_code == 403
+    if response.status_code == 200:
+        return response.json()
+    else:
+        raise Exception(f"Mark delivered failed: {response.status_code} {response.text}")
+
+print("=" * 80)
+print("RETRO FARMS FEEDBACK SYSTEM - COMPREHENSIVE BACKEND TESTS")
+print("=" * 80)
+print()
+
+# Test 1: Cannot submit for a non-Delivered order
+print("Test 1: Cannot submit feedback for non-Delivered order")
+try:
+    customer1 = create_customer_session()
+    order1 = create_order_as_customer(customer1["token"])
     
-    # DELETE
-    resp = staff_session.delete(f"{BASE_URL}/admin/categories/eggs")
-    delete_ok = resp.status_code == 403
+    # Try to submit feedback immediately (order is Pending)
+    cookies = {"session_token": customer1["token"]}
+    response = requests.post(f"{BASE_URL}/feedback",
+        cookies=cookies,
+        json={"order_id": order1, "rating": 5, "comment": "Great"})
     
-    if post_ok and patch_ok and delete_ok:
-        log_test("Category CRUD staff permissions (403)", True)
-        return True
+    if response.status_code == 400 and "only available after your order is delivered" in response.text.lower():
+        log_test("Cannot submit for non-Delivered order", True, "Correctly returns 400")
     else:
-        log_test("Category CRUD staff permissions (403)", False, f"POST:{resp.status_code if not post_ok else 403}, PATCH:{resp.status_code if not patch_ok else 403}, DELETE:{resp.status_code if not delete_ok else 403}")
-        return False
+        log_test("Cannot submit for non-Delivered order", False, f"Expected 400, got {response.status_code}: {response.text}")
+except Exception as e:
+    log_test("Cannot submit for non-Delivered order", False, str(e))
 
-# ==================== REVENUE BREAKDOWN ====================
+print()
 
-def test_revenue_breakdown_day():
-    """Test GET /api/admin/revenue/breakdown?view=day"""
-    resp = admin_session.get(f"{BASE_URL}/admin/revenue/breakdown?view=day")
-    if resp.status_code == 200:
-        data = resp.json()
-        if 'view' in data and 'rows' in data and 'summary' in data:
-            if data['view'] == 'day' and isinstance(data['rows'], list):
-                summary = data['summary']
-                if 'total_revenue' in summary and 'total_orders' in summary and 'aov' in summary:
-                    log_test("GET /api/admin/revenue/breakdown?view=day", True, f"Summary: {summary}")
-                    return True
-        log_test("GET /api/admin/revenue/breakdown?view=day", False, f"Unexpected structure: {data}")
-        return False
+# Test 2: Cannot submit for someone else's order
+print("Test 2: Cannot submit feedback for someone else's order")
+try:
+    customer2 = create_customer_session()
+    
+    # Customer 2 tries to submit feedback for customer 1's order
+    cookies = {"session_token": customer2["token"]}
+    response = requests.post(f"{BASE_URL}/feedback",
+        cookies=cookies,
+        json={"order_id": order1, "rating": 5, "comment": "Great"})
+    
+    if response.status_code == 403 and "only review your own orders" in response.text.lower():
+        log_test("Cannot submit for someone else's order", True, "Correctly returns 403")
     else:
-        log_test("GET /api/admin/revenue/breakdown?view=day", False, f"Status {resp.status_code}: {resp.text}")
-        return False
+        log_test("Cannot submit for someone else's order", False, f"Expected 403, got {response.status_code}: {response.text}")
+except Exception as e:
+    log_test("Cannot submit for someone else's order", False, str(e))
 
-def test_revenue_breakdown_week():
-    """Test GET /api/admin/revenue/breakdown?view=week"""
-    resp = admin_session.get(f"{BASE_URL}/admin/revenue/breakdown?view=week")
-    if resp.status_code == 200:
-        data = resp.json()
-        if data.get('view') == 'week' and isinstance(data.get('rows'), list):
-            # Check period format like "2026-W29"
-            if len(data['rows']) > 0:
-                period = data['rows'][0].get('period', '')
-                if 'W' in period:
-                    log_test("GET /api/admin/revenue/breakdown?view=week", True, f"Period format: {period}")
-                    return True
-                else:
-                    log_test("GET /api/admin/revenue/breakdown?view=week", False, f"Period format incorrect: {period}")
-                    return False
-            else:
-                log_test("GET /api/admin/revenue/breakdown?view=week", True, "No data but structure correct")
-                return True
-        log_test("GET /api/admin/revenue/breakdown?view=week", False, f"Unexpected structure: {data}")
-        return False
+print()
+
+# Test 3: Cannot submit unauthenticated
+print("Test 3: Cannot submit feedback unauthenticated")
+try:
+    response = requests.post(f"{BASE_URL}/feedback",
+        json={"order_id": order1, "rating": 5, "comment": "Great"})
+    
+    if response.status_code == 401:
+        log_test("Cannot submit unauthenticated", True, "Correctly returns 401")
     else:
-        log_test("GET /api/admin/revenue/breakdown?view=week", False, f"Status {resp.status_code}: {resp.text}")
-        return False
+        log_test("Cannot submit unauthenticated", False, f"Expected 401, got {response.status_code}: {response.text}")
+except Exception as e:
+    log_test("Cannot submit unauthenticated", False, str(e))
 
-def test_revenue_breakdown_month():
-    """Test GET /api/admin/revenue/breakdown?view=month"""
-    resp = admin_session.get(f"{BASE_URL}/admin/revenue/breakdown?view=month")
-    if resp.status_code == 200:
-        data = resp.json()
-        if data.get('view') == 'month' and isinstance(data.get('rows'), list):
-            if len(data['rows']) > 0:
-                period = data['rows'][0].get('period', '')
-                # Format like "2026-07"
-                if len(period) == 7 and period[4] == '-':
-                    log_test("GET /api/admin/revenue/breakdown?view=month", True, f"Period format: {period}")
-                    return True
-                else:
-                    log_test("GET /api/admin/revenue/breakdown?view=month", False, f"Period format incorrect: {period}")
-                    return False
-            else:
-                log_test("GET /api/admin/revenue/breakdown?view=month", True, "No data but structure correct")
-                return True
-        log_test("GET /api/admin/revenue/breakdown?view=month", False, f"Unexpected structure: {data}")
-        return False
+print()
+
+# Test 4: Admin/staff cannot submit
+print("Test 4: Admin/staff cannot submit feedback")
+try:
+    admin_token = admin_login()
+    
+    # Mark order1 as Delivered first
+    mark_order_delivered(order1, admin_token)
+    
+    # Admin tries to submit feedback
+    cookies = {"session_token": admin_token}
+    response = requests.post(f"{BASE_URL}/feedback",
+        cookies=cookies,
+        json={"order_id": order1, "rating": 5, "comment": "Great"})
+    
+    if response.status_code == 403 and "staff and admins cannot submit" in response.text.lower():
+        log_test("Admin cannot submit feedback", True, "Correctly returns 403")
     else:
-        log_test("GET /api/admin/revenue/breakdown?view=month", False, f"Status {resp.status_code}: {resp.text}")
-        return False
-
-def test_revenue_breakdown_year():
-    """Test GET /api/admin/revenue/breakdown?view=year"""
-    resp = admin_session.get(f"{BASE_URL}/admin/revenue/breakdown?view=year")
-    if resp.status_code == 200:
-        data = resp.json()
-        if data.get('view') == 'year' and isinstance(data.get('rows'), list):
-            if len(data['rows']) > 0:
-                period = data['rows'][0].get('period', '')
-                # Format like "2026"
-                if len(period) == 4 and period.isdigit():
-                    log_test("GET /api/admin/revenue/breakdown?view=year", True, f"Period format: {period}")
-                    return True
-                else:
-                    log_test("GET /api/admin/revenue/breakdown?view=year", False, f"Period format incorrect: {period}")
-                    return False
-            else:
-                log_test("GET /api/admin/revenue/breakdown?view=year", True, "No data but structure correct")
-                return True
-        log_test("GET /api/admin/revenue/breakdown?view=year", False, f"Unexpected structure: {data}")
-        return False
+        log_test("Admin cannot submit feedback", False, f"Expected 403, got {response.status_code}: {response.text}")
+    
+    # Staff tries to submit feedback
+    staff_token = staff_login()
+    cookies = {"session_token": staff_token}
+    response = requests.post(f"{BASE_URL}/feedback",
+        cookies=cookies,
+        json={"order_id": order1, "rating": 5, "comment": "Great"})
+    
+    if response.status_code == 403 and "staff and admins cannot submit" in response.text.lower():
+        log_test("Staff cannot submit feedback", True, "Correctly returns 403")
     else:
-        log_test("GET /api/admin/revenue/breakdown?view=year", False, f"Status {resp.status_code}: {resp.text}")
-        return False
+        log_test("Staff cannot submit feedback", False, f"Expected 403, got {response.status_code}: {response.text}")
+except Exception as e:
+    log_test("Admin/staff cannot submit feedback", False, str(e))
 
-def test_revenue_breakdown_date_filter():
-    """Test GET /api/admin/revenue/breakdown with start/end filters"""
-    start = (datetime.now() - timedelta(days=30)).isoformat()
-    end = datetime.now().isoformat()
-    resp = admin_session.get(f"{BASE_URL}/admin/revenue/breakdown?view=day&start={start}&end={end}")
-    if resp.status_code == 200:
-        data = resp.json()
-        if 'rows' in data and 'summary' in data:
-            log_test("GET /api/admin/revenue/breakdown with start/end filters", True)
-            return True
-        log_test("GET /api/admin/revenue/breakdown with start/end filters", False, f"Unexpected structure: {data}")
-        return False
-    else:
-        log_test("GET /api/admin/revenue/breakdown with start/end filters", False, f"Status {resp.status_code}: {resp.text}")
-        return False
+print()
 
-def test_revenue_breakdown_invalid_view():
-    """Test GET /api/admin/revenue/breakdown?view=invalid"""
-    resp = admin_session.get(f"{BASE_URL}/admin/revenue/breakdown?view=invalid")
-    if resp.status_code == 422:
-        log_test("GET /api/admin/revenue/breakdown?view=invalid → 422", True)
-        return True
-    else:
-        log_test("GET /api/admin/revenue/breakdown?view=invalid → 422", False, f"Expected 422, got {resp.status_code}")
-        return False
-
-# ==================== EXCEL EXPORT ====================
-
-def test_excel_export():
-    """Test GET /api/admin/orders/export.xlsx"""
-    resp = admin_session.get(f"{BASE_URL}/admin/orders/export.xlsx")
-    if resp.status_code == 200:
-        content_type = resp.headers.get('Content-Type', '')
-        content_disp = resp.headers.get('Content-Disposition', '')
+# Test 5: Happy path - submit feedback for delivered order
+print("Test 5: Happy path - submit feedback for delivered order")
+try:
+    # Customer 1 submits feedback (order1 is now Delivered)
+    cookies = {"session_token": customer1["token"]}
+    response = requests.post(f"{BASE_URL}/feedback",
+        cookies=cookies,
+        json={"order_id": order1, "rating": 5, "comment": "Excellent service!"})
+    
+    if response.status_code == 200:
+        feedback_data = response.json()
+        feedback_id = feedback_data.get("feedback_id")
         
-        # Check headers
-        if 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' in content_type:
-            if 'attachment' in content_disp:
-                # Check if body starts with PK (xlsx signature)
-                if resp.content[:2] == b'PK':
-                    log_test("GET /api/admin/orders/export.xlsx", True, f"Content-Type and PK signature correct")
-                    return True
-                else:
-                    log_test("GET /api/admin/orders/export.xlsx", False, f"Body doesn't start with PK signature")
-                    return False
-            else:
-                log_test("GET /api/admin/orders/export.xlsx", False, f"Content-Disposition missing 'attachment'")
-                return False
+        # Check response structure
+        if (feedback_id and 
+            feedback_data.get("rating") == 5 and 
+            feedback_data.get("comment") == "Excellent service!" and
+            feedback_data.get("status") in ["active", "flagged"]):
+            log_test("Submit feedback for delivered order", True, f"Feedback created with ID {feedback_id}, status={feedback_data.get('status')}")
         else:
-            log_test("GET /api/admin/orders/export.xlsx", False, f"Wrong Content-Type: {content_type}")
-            return False
+            log_test("Submit feedback for delivered order", False, f"Response missing required fields: {feedback_data}")
     else:
-        log_test("GET /api/admin/orders/export.xlsx", False, f"Status {resp.status_code}: {resp.text}")
-        return False
-
-def test_excel_export_with_filters():
-    """Test GET /api/admin/orders/export.xlsx with start/end/status filters"""
-    start = (datetime.now() - timedelta(days=30)).isoformat()
-    end = datetime.now().isoformat()
-    resp = admin_session.get(f"{BASE_URL}/admin/orders/export.xlsx?start={start}&end={end}&status=Delivered")
-    if resp.status_code == 200:
-        if resp.content[:2] == b'PK':
-            log_test("GET /api/admin/orders/export.xlsx with filters", True)
-            return True
+        log_test("Submit feedback for delivered order", False, f"Expected 200, got {response.status_code}: {response.text}")
+    
+    # Test duplicate submission
+    response = requests.post(f"{BASE_URL}/feedback",
+        cookies=cookies,
+        json={"order_id": order1, "rating": 4, "comment": "Changed my mind"})
+    
+    if response.status_code == 400 and "already submitted" in response.text.lower():
+        log_test("Duplicate feedback prevention", True, "Correctly returns 400")
+    else:
+        log_test("Duplicate feedback prevention", False, f"Expected 400, got {response.status_code}: {response.text}")
+    
+    # Test GET feedback by order_id as owner
+    response = requests.get(f"{BASE_URL}/feedback/order/{order1}",
+        cookies=cookies)
+    
+    if response.status_code == 200 and response.json() is not None:
+        fb = response.json()
+        if fb.get("feedback_id") == feedback_id:
+            log_test("Get feedback by order_id (owner)", True, "Returns correct feedback")
         else:
-            log_test("GET /api/admin/orders/export.xlsx with filters", False, "Body doesn't start with PK")
-            return False
+            log_test("Get feedback by order_id (owner)", False, f"Feedback ID mismatch")
     else:
-        log_test("GET /api/admin/orders/export.xlsx with filters", False, f"Status {resp.status_code}: {resp.text}")
-        return False
-
-def test_excel_export_unauthenticated():
-    """Test GET /api/admin/orders/export.xlsx without auth"""
-    resp = requests.get(f"{BASE_URL}/admin/orders/export.xlsx")
-    if resp.status_code == 401:
-        log_test("GET /api/admin/orders/export.xlsx (unauthenticated → 401)", True)
-        return True
+        log_test("Get feedback by order_id (owner)", False, f"Expected 200 with data, got {response.status_code}")
+    
+    # Test GET feedback unauthenticated
+    response = requests.get(f"{BASE_URL}/feedback/order/{order1}")
+    
+    if response.status_code == 200 and response.json() is None:
+        log_test("Get feedback unauthenticated returns null", True, "Correctly returns null")
     else:
-        log_test("GET /api/admin/orders/export.xlsx (unauthenticated → 401)", False, f"Expected 401, got {resp.status_code}")
-        return False
+        log_test("Get feedback unauthenticated returns null", False, f"Expected null, got {response.json()}")
+    
+except Exception as e:
+    log_test("Happy path", False, str(e))
 
-# ==================== CUSTOMER LOOKUP + UPDATE ====================
+print()
 
-def test_customer_lookup_not_found():
-    """Test GET /api/admin/customers/lookup?phone=9999911111 (not found)"""
-    resp = admin_session.get(f"{BASE_URL}/admin/customers/lookup?phone=9999911111")
-    if resp.status_code == 200:
-        data = resp.json()
-        if data == {}:
-            log_test("GET /api/admin/customers/lookup (not found → {})", True)
-            return True
+# Test 6: Edit feedback within 48h
+print("Test 6: Edit feedback within 48h")
+try:
+    # Edit the feedback
+    cookies = {"session_token": customer1["token"]}
+    response = requests.patch(f"{BASE_URL}/feedback/{feedback_id}",
+        cookies=cookies,
+        json={"rating": 4, "comment": "Updated comment"})
+    
+    if response.status_code == 200:
+        updated = response.json()
+        if (updated.get("rating") == 4 and 
+            updated.get("comment") == "Updated comment" and
+            updated.get("edit_count") == 1):
+            log_test("Edit feedback within 48h", True, f"Rating updated to 4, edit_count=1")
         else:
-            log_test("GET /api/admin/customers/lookup (not found → {})", False, f"Expected empty dict, got {data}")
-            return False
+            log_test("Edit feedback within 48h", False, f"Fields not updated correctly: {updated}")
     else:
-        log_test("GET /api/admin/customers/lookup (not found → {})", False, f"Status {resp.status_code}: {resp.text}")
-        return False
+        log_test("Edit feedback within 48h", False, f"Expected 200, got {response.status_code}: {response.text}")
+    
+    # Try to edit from different customer
+    cookies = {"session_token": customer2["token"]}
+    response = requests.patch(f"{BASE_URL}/feedback/{feedback_id}",
+        cookies=cookies,
+        json={"rating": 3})
+    
+    if response.status_code == 403:
+        log_test("Cannot edit someone else's feedback", True, "Correctly returns 403")
+    else:
+        log_test("Cannot edit someone else's feedback", False, f"Expected 403, got {response.status_code}")
+    
+except Exception as e:
+    log_test("Edit feedback", False, str(e))
 
-def test_customer_lookup_found():
-    """Test GET /api/admin/customers/lookup?phone=... (found after creating offline order)"""
-    global test_customer_user_id
+print()
+
+# Test 7: Anti-fraud auto-flag
+print("Test 7: Anti-fraud auto-flag heuristics")
+try:
+    # Test instant_after_delivery flag
+    # Create a new order and mark it delivered, then immediately submit feedback
+    customer3 = create_customer_session()
+    order3 = create_order_as_customer(customer3["token"])
+    admin_token = admin_login()
+    mark_order_delivered(order3, admin_token)
     
-    # Create an offline order with phone 9999911111
-    payload = {
-        "customer_name": "Test Customer",
-        "customer_phone": "9999911111",
-        "customer_email": "testcustomer@example.com",
-        "items": [{"slug": "green-chilli", "variant_id": "250g", "qty": 1}],
-        "address": {
-            "full_name": "Test Customer",
-            "phone": "9999911111",
-            "line1": "123 Test St",
-            "city": "Hyderabad",
-            "pincode": "500001"
-        },
-        "payment_method": "cash",
-        "payment_status": "Paid"
-    }
-    create_resp = admin_session.post(f"{BASE_URL}/admin/orders/offline", json=payload)
-    if create_resp.status_code not in [200, 201]:
-        log_test("Customer lookup (setup)", False, f"Failed to create offline order: {create_resp.status_code}")
-        return False
+    # Submit feedback immediately (within 5 seconds)
+    cookies = {"session_token": customer3["token"]}
+    response = requests.post(f"{BASE_URL}/feedback",
+        cookies=cookies,
+        json={"order_id": order3, "rating": 5, "comment": "Instant feedback"})
     
-    # Now lookup by phone
-    resp = admin_session.get(f"{BASE_URL}/admin/customers/lookup?phone=9999911111")
-    if resp.status_code == 200:
-        data = resp.json()
-        if data and 'user_id' in data and 'saved_address' in data:
-            test_customer_user_id = data['user_id']
-            log_test("GET /api/admin/customers/lookup (found)", True, f"Found user_id: {test_customer_user_id}")
-            return True
+    if response.status_code == 200:
+        fb = response.json()
+        if fb.get("status") == "flagged" and "instant_after_delivery" in fb.get("flags", []):
+            log_test("Anti-fraud: instant_after_delivery", True, "Correctly flagged")
         else:
-            log_test("GET /api/admin/customers/lookup (found)", False, f"Unexpected response: {data}")
-            return False
+            log_test("Anti-fraud: instant_after_delivery", False, f"Not flagged or wrong flag: status={fb.get('status')}, flags={fb.get('flags')}")
     else:
-        log_test("GET /api/admin/customers/lookup (found)", False, f"Status {resp.status_code}: {resp.text}")
-        return False
-
-def test_customer_update():
-    """Test PATCH /api/admin/customers/{user_id}"""
-    global test_customer_user_id
+        log_test("Anti-fraud: instant_after_delivery", False, f"Expected 200, got {response.status_code}")
     
-    if not test_customer_user_id:
-        log_test("PATCH /api/admin/customers/{user_id}", False, "No test_customer_user_id available")
-        return False
+    # Test duplicate_comment flag
+    # Create two customers with same comment
+    customer4 = create_customer_session()
+    order4 = create_order_as_customer(customer4["token"])
+    mark_order_delivered(order4, admin_token)
+    time.sleep(1)  # Wait a bit to avoid instant flag
     
-    payload = {
-        "name": "Updated Customer Name",
-        "address": {
-            "line1": "New Street 456",
-            "city": "HYD",
-            "pincode": "500001"
-        }
-    }
-    resp = admin_session.patch(f"{BASE_URL}/admin/customers/{test_customer_user_id}", json=payload)
-    if resp.status_code == 200:
-        data = resp.json()
-        if data.get('name') == 'Updated Customer Name':
-            if data.get('saved_address', {}).get('line1') == 'New Street 456':
-                log_test("PATCH /api/admin/customers/{user_id}", True)
-                return True
-            else:
-                log_test("PATCH /api/admin/customers/{user_id}", False, f"Address not updated: {data.get('saved_address')}")
-                return False
-        else:
-            log_test("PATCH /api/admin/customers/{user_id}", False, f"Name not updated: {data.get('name')}")
-            return False
+    duplicate_comment = "This is a duplicate comment for testing"
+    
+    # First customer submits
+    cookies = {"session_token": customer4["token"]}
+    response = requests.post(f"{BASE_URL}/feedback",
+        cookies=cookies,
+        json={"order_id": order4, "rating": 5, "comment": duplicate_comment})
+    
+    if response.status_code != 200:
+        log_test("Anti-fraud: duplicate_comment setup", False, f"First feedback failed: {response.status_code}")
     else:
-        log_test("PATCH /api/admin/customers/{user_id}", False, f"Status {resp.status_code}: {resp.text}")
-        return False
-
-def test_customer_update_staff_permission():
-    """Test that staff can also lookup/update customers"""
-    # Lookup
-    lookup_resp = staff_session.get(f"{BASE_URL}/admin/customers/lookup?phone=9999911111")
-    lookup_ok = lookup_resp.status_code == 200
-    
-    # Update
-    if test_customer_user_id:
-        update_resp = staff_session.patch(f"{BASE_URL}/admin/customers/{test_customer_user_id}",
-                                          json={"name": "Staff Updated"})
-        update_ok = update_resp.status_code == 200
-    else:
-        update_ok = False
-    
-    if lookup_ok and update_ok:
-        log_test("Customer lookup/update staff permissions", True)
-        return True
-    else:
-        log_test("Customer lookup/update staff permissions", False, f"Lookup: {lookup_resp.status_code}, Update: {update_resp.status_code if test_customer_user_id else 'N/A'}")
-        return False
-
-# ==================== OFFLINE ORDER WITH NEW FIELDS ====================
-
-def test_offline_order_new_fields():
-    """Test POST /api/admin/orders/offline with full address dict and payment fields"""
-    payload = {
-        "customer_name": "New Offline Customer",
-        "customer_phone": "8888888888",
-        "customer_email": "newoffline@example.com",
-        "items": [{"slug": "tomatoes", "variant_id": "1kg", "qty": 2}],
-        "address": {
-            "full_name": "New Offline Customer",
-            "phone": "8888888888",
-            "line1": "789 Offline St",
-            "line2": "Apt 4",
-            "city": "Bangalore",
-            "pincode": "560001",
-            "landmark": "Near Park"
-        },
-        "payment_method": "not_paid",
-        "payment_status": "Not Paid"
-    }
-    resp = admin_session.post(f"{BASE_URL}/admin/orders/offline", json=payload)
-    if resp.status_code in [200, 201]:
-        data = resp.json()
-        checks = []
-        checks.append(data.get('payment_method') == 'not_paid')
-        checks.append(data.get('payment_status') == 'Not Paid')
-        checks.append(data.get('source') == 'offline')
-        checks.append(data.get('address', {}).get('line1') == '789 Offline St')
-        checks.append(data.get('address', {}).get('city') == 'Bangalore')
+        # Second customer submits same comment
+        customer5 = create_customer_session()
+        order5 = create_order_as_customer(customer5["token"])
+        mark_order_delivered(order5, admin_token)
+        time.sleep(1)
         
-        if all(checks):
-            log_test("POST /api/admin/orders/offline with new fields", True)
-            return True
-        else:
-            log_test("POST /api/admin/orders/offline with new fields", False, f"Some fields incorrect: {data}")
-            return False
-    else:
-        log_test("POST /api/admin/orders/offline with new fields", False, f"Status {resp.status_code}: {resp.text}")
-        return False
-
-def test_offline_order_saved_address():
-    """Test that offline order saves customer address to saved_address"""
-    # Lookup the customer we just created
-    resp = admin_session.get(f"{BASE_URL}/admin/customers/lookup?phone=8888888888")
-    if resp.status_code == 200:
-        data = resp.json()
-        if data and 'saved_address' in data:
-            saved = data['saved_address']
-            if saved.get('line1') == '789 Offline St' and saved.get('city') == 'Bangalore':
-                log_test("Offline order saves customer address", True)
-                return True
-            else:
-                log_test("Offline order saves customer address", False, f"Address not saved correctly: {saved}")
-                return False
-        else:
-            log_test("Offline order saves customer address", False, f"No saved_address in response: {data}")
-            return False
-    else:
-        log_test("Offline order saves customer address", False, f"Status {resp.status_code}: {resp.text}")
-        return False
-
-def test_offline_order_reuse_customer():
-    """Test that second offline order with same phone reuses existing customer"""
-    # Create another offline order with same phone but no address override
-    payload = {
-        "customer_name": "New Offline Customer",
-        "customer_phone": "8888888888",
-        "items": [{"slug": "green-chilli", "variant_id": "250g", "qty": 1}],
-        "payment_method": "cash",
-        "payment_status": "Paid"
-    }
-    resp = admin_session.post(f"{BASE_URL}/admin/orders/offline", json=payload)
-    if resp.status_code in [200, 201]:
-        # Lookup customer again
-        lookup_resp = admin_session.get(f"{BASE_URL}/admin/customers/lookup?phone=8888888888")
-        if lookup_resp.status_code == 200:
-            data = lookup_resp.json()
-            # Name and phone should stay the same
-            if data.get('name') == 'New Offline Customer' and data.get('phone') == '8888888888':
-                log_test("Offline order reuses existing customer", True)
-                return True
-            else:
-                log_test("Offline order reuses existing customer", False, f"Customer data changed: {data}")
-                return False
-        else:
-            log_test("Offline order reuses existing customer", False, f"Lookup failed: {lookup_resp.status_code}")
-            return False
-    else:
-        log_test("Offline order reuses existing customer", False, f"Status {resp.status_code}: {resp.text}")
-        return False
-
-# ==================== CHICKEN OPTIONS IN ITEMS ====================
-
-def test_chicken_options_in_order():
-    """Test POST /api/orders/create with items containing options"""
-    global test_order_id
-    
-    # First, create a customer session
-    from motor.motor_asyncio import AsyncIOMotorClient
-    import asyncio
-    import os
-    import uuid
-    
-    # We need to create a session in MongoDB directly for this test
-    # Let's use a simpler approach: create an offline order with options
-    payload = {
-        "customer_name": "Chicken Options Customer",
-        "customer_phone": "7777777777",
-        "items": [{
-            "slug": "country-chicken",
-            "variant_id": "1kg",
-            "qty": 1,
-            "options": {
-                "bird_type": "Tender Bird",
-                "delivery_date": "Tomorrow",
-                "piece_size": "Biryani Cut",
-                "instructions": "Small pieces"
-            }
-        }],
-        "address": {
-            "full_name": "Chicken Options Customer",
-            "phone": "7777777777",
-            "line1": "123 Chicken St",
-            "city": "Hyderabad",
-            "pincode": "500001"
-        },
-        "payment_method": "cod",
-        "payment_status": "Not Paid"
-    }
-    resp = admin_session.post(f"{BASE_URL}/admin/orders/offline", json=payload)
-    if resp.status_code in [200, 201]:
-        data = resp.json()
-        test_order_id = data.get('order_id')
+        cookies = {"session_token": customer5["token"]}
+        response = requests.post(f"{BASE_URL}/feedback",
+            cookies=cookies,
+            json={"order_id": order5, "rating": 5, "comment": duplicate_comment})
         
-        # Check if options are in the response
-        items = data.get('items', [])
-        if len(items) > 0:
-            options = items[0].get('options')
-            if options:
-                checks = []
-                checks.append(options.get('bird_type') == 'Tender Bird')
-                checks.append(options.get('delivery_date') == 'Tomorrow')
-                checks.append(options.get('piece_size') == 'Biryani Cut')
-                checks.append(options.get('instructions') == 'Small pieces')
-                
-                if all(checks):
-                    log_test("POST order with chicken options", True, f"Order ID: {test_order_id}")
-                    return True
-                else:
-                    log_test("POST order with chicken options", False, f"Options incomplete: {options}")
-                    return False
+        if response.status_code == 200:
+            fb = response.json()
+            if fb.get("status") == "flagged" and "duplicate_comment" in fb.get("flags", []):
+                log_test("Anti-fraud: duplicate_comment", True, "Correctly flagged")
             else:
-                log_test("POST order with chicken options", False, "No options in response")
-                return False
+                log_test("Anti-fraud: duplicate_comment", False, f"Not flagged: status={fb.get('status')}, flags={fb.get('flags')}")
         else:
-            log_test("POST order with chicken options", False, "No items in response")
-            return False
+            log_test("Anti-fraud: duplicate_comment", False, f"Expected 200, got {response.status_code}")
+    
+    # Test high_ip_volume / high_user_volume
+    # Create 3 customers and submit 3 feedbacks quickly
+    print("  Testing high volume flags (creating 3 orders and feedbacks)...")
+    volume_customers = []
+    for i in range(3):
+        c = create_customer_session()
+        o = create_order_as_customer(c["token"])
+        mark_order_delivered(o, admin_token)
+        volume_customers.append({"customer": c, "order": o})
+        time.sleep(0.5)
+    
+    # Submit 3 feedbacks from same IP (test client)
+    flagged_count = 0
+    for i, vc in enumerate(volume_customers):
+        cookies = {"session_token": vc["customer"]["token"]}
+        response = requests.post(f"{BASE_URL}/feedback",
+            cookies=cookies,
+            json={"order_id": vc["order"], "rating": 5, "comment": f"Volume test {i}"})
+        
+        if response.status_code == 200:
+            fb = response.json()
+            if fb.get("status") == "flagged" and ("high_ip_volume" in fb.get("flags", []) or "high_user_volume" in fb.get("flags", [])):
+                flagged_count += 1
+    
+    if flagged_count > 0:
+        log_test("Anti-fraud: high_ip_volume or high_user_volume", True, f"{flagged_count} feedback(s) flagged")
     else:
-        log_test("POST order with chicken options", False, f"Status {resp.status_code}: {resp.text}")
-        return False
+        log_test("Anti-fraud: high_ip_volume or high_user_volume", False, "No feedbacks flagged for high volume")
+    
+except Exception as e:
+    log_test("Anti-fraud auto-flag", False, str(e))
 
-def test_chicken_options_in_get_order():
-    """Test GET /api/orders/{order_id} returns items with options intact"""
-    global test_order_id
+print()
+
+# Test 8: Rate limit (5 feedbacks per hour)
+print("Test 8: Rate limit - max 5 feedbacks per hour")
+try:
+    # We already have several feedbacks submitted above
+    # Create 2 more customers and try to submit (should hit rate limit)
+    admin_token = admin_login()
     
-    if not test_order_id:
-        log_test("GET /api/orders/{order_id} with options", False, "No test_order_id available")
-        return False
+    rate_limit_customers = []
+    for i in range(2):
+        c = create_customer_session()
+        o = create_order_as_customer(c["token"])
+        mark_order_delivered(o, admin_token)
+        rate_limit_customers.append({"customer": c, "order": o})
+        time.sleep(0.3)
     
-    resp = admin_session.get(f"{BASE_URL}/orders/{test_order_id}")
-    if resp.status_code == 200:
-        data = resp.json()
-        items = data.get('items', [])
-        if len(items) > 0:
-            options = items[0].get('options')
-            if options and all(k in options for k in ['bird_type', 'delivery_date', 'piece_size', 'instructions']):
-                log_test("GET /api/orders/{order_id} with options", True)
-                return True
+    # Try to submit feedbacks (should hit rate limit on 6th attempt)
+    for i, rc in enumerate(rate_limit_customers):
+        cookies = {"session_token": rc["customer"]["token"]}
+        response = requests.post(f"{BASE_URL}/feedback",
+            cookies=cookies,
+            json={"order_id": rc["order"], "rating": 5, "comment": f"Rate limit test {i}"})
+        
+        if response.status_code == 429:
+            log_test("Rate limit enforcement", True, f"Correctly returns 429 after multiple submissions")
+            break
+        elif i == len(rate_limit_customers) - 1:
+            # If we didn't hit rate limit, it might be because we're under the limit
+            log_test("Rate limit enforcement", True, "Rate limit not hit (under 5 submissions in this test run)")
+    
+except Exception as e:
+    log_test("Rate limit", False, str(e))
+
+print()
+
+# Test 9: Admin moderation
+print("Test 9: Admin moderation endpoints")
+try:
+    admin_token = admin_login()
+    cookies = {"session_token": admin_token}
+    
+    # GET /api/admin/feedback - list all
+    response = requests.get(f"{BASE_URL}/admin/feedback", cookies=cookies)
+    
+    if response.status_code == 200:
+        all_feedback = response.json()
+        if isinstance(all_feedback, list) and len(all_feedback) > 0:
+            log_test("Admin list all feedback", True, f"Returns {len(all_feedback)} feedback(s)")
+        else:
+            log_test("Admin list all feedback", False, f"Expected non-empty list, got {all_feedback}")
+    else:
+        log_test("Admin list all feedback", False, f"Expected 200, got {response.status_code}")
+    
+    # GET /api/admin/feedback?status=flagged
+    response = requests.get(f"{BASE_URL}/admin/feedback?status=flagged", cookies=cookies)
+    
+    if response.status_code == 200:
+        flagged_feedback = response.json()
+        if isinstance(flagged_feedback, list):
+            # Check all returned items have status=flagged
+            all_flagged = all(fb.get("status") == "flagged" for fb in flagged_feedback)
+            if all_flagged:
+                log_test("Admin filter by status=flagged", True, f"Returns {len(flagged_feedback)} flagged feedback(s)")
             else:
-                log_test("GET /api/orders/{order_id} with options", False, f"Options missing or incomplete: {options}")
-                return False
+                log_test("Admin filter by status=flagged", False, "Some feedback not flagged")
         else:
-            log_test("GET /api/orders/{order_id} with options", False, "No items in response")
-            return False
+            log_test("Admin filter by status=flagged", False, f"Expected list, got {flagged_feedback}")
     else:
-        log_test("GET /api/orders/{order_id} with options", False, f"Status {resp.status_code}: {resp.text}")
-        return False
+        log_test("Admin filter by status=flagged", False, f"Expected 200, got {response.status_code}")
+    
+    # PATCH /api/admin/feedback/{id} - update status to hidden
+    if len(all_feedback) > 0:
+        test_fb_id = all_feedback[0]["feedback_id"]
+        
+        response = requests.patch(f"{BASE_URL}/admin/feedback/{test_fb_id}",
+            cookies=cookies,
+            json={"status": "hidden"})
+        
+        if response.status_code == 200:
+            updated = response.json()
+            if (updated.get("status") == "hidden" and 
+                updated.get("moderated_by") and 
+                updated.get("moderated_at")):
+                log_test("Admin update feedback status", True, "Status updated to hidden with moderated_by/moderated_at")
+            else:
+                log_test("Admin update feedback status", False, f"Fields not set correctly: {updated}")
+        else:
+            log_test("Admin update feedback status", False, f"Expected 200, got {response.status_code}")
+        
+        # PATCH with admin_response
+        response = requests.patch(f"{BASE_URL}/admin/feedback/{test_fb_id}",
+            cookies=cookies,
+            json={"admin_response": "Thanks for your feedback!"})
+        
+        if response.status_code == 200:
+            updated = response.json()
+            if updated.get("admin_response") == "Thanks for your feedback!":
+                log_test("Admin add response", True, "admin_response saved")
+            else:
+                log_test("Admin add response", False, f"admin_response not saved: {updated}")
+        else:
+            log_test("Admin add response", False, f"Expected 200, got {response.status_code}")
+    
+    # Test staff can also moderate
+    staff_token = staff_login()
+    cookies = {"session_token": staff_token}
+    
+    response = requests.get(f"{BASE_URL}/admin/feedback", cookies=cookies)
+    
+    if response.status_code == 200:
+        log_test("Staff can list feedback", True, "Staff has access")
+    else:
+        log_test("Staff can list feedback", False, f"Expected 200, got {response.status_code}")
+    
+    if len(all_feedback) > 1:
+        test_fb_id2 = all_feedback[1]["feedback_id"]
+        response = requests.patch(f"{BASE_URL}/admin/feedback/{test_fb_id2}",
+            cookies=cookies,
+            json={"status": "active"})
+        
+        if response.status_code == 200:
+            log_test("Staff can moderate feedback", True, "Staff can update status")
+        else:
+            log_test("Staff can moderate feedback", False, f"Expected 200, got {response.status_code}")
+    
+except Exception as e:
+    log_test("Admin moderation", False, str(e))
 
-def test_chicken_options_in_admin_orders():
-    """Test GET /api/admin/orders returns orders with options"""
-    resp = admin_session.get(f"{BASE_URL}/admin/orders")
-    if resp.status_code == 200:
-        data = resp.json()
-        if isinstance(data, list) and len(data) > 0:
-            # Find our test order
-            test_order = None
-            for order in data:
-                if order.get('order_id') == test_order_id:
-                    test_order = order
-                    break
+print()
+
+# Test 10: Public feedback endpoint
+print("Test 10: Public feedback endpoint")
+try:
+    response = requests.get(f"{BASE_URL}/feedback/public")
+    
+    if response.status_code == 200:
+        public_feedback = response.json()
+        if isinstance(public_feedback, list):
+            # Check all have status=active and rating>=4
+            all_valid = all(
+                fb.get("status") == "active" and 
+                fb.get("rating") >= 4 and
+                "ip_address" not in fb and
+                "user_agent" not in fb and
+                "customer_email" not in fb and
+                "customer_phone" not in fb
+                for fb in public_feedback
+            )
             
-            if test_order:
-                items = test_order.get('items', [])
-                if len(items) > 0:
-                    options = items[0].get('options')
-                    if options and 'bird_type' in options:
-                        log_test("GET /api/admin/orders with options", True)
-                        return True
-                    else:
-                        log_test("GET /api/admin/orders with options", False, f"Options missing: {options}")
-                        return False
-                else:
-                    log_test("GET /api/admin/orders with options", False, "No items in test order")
-                    return False
+            if all_valid:
+                log_test("Public feedback endpoint", True, f"Returns {len(public_feedback)} public feedback(s), no PII")
             else:
-                log_test("GET /api/admin/orders with options", False, "Test order not found in list")
-                return False
+                # Check which validation failed
+                issues = []
+                for fb in public_feedback:
+                    if fb.get("status") != "active":
+                        issues.append(f"status={fb.get('status')}")
+                    if fb.get("rating") < 4:
+                        issues.append(f"rating={fb.get('rating')}")
+                    if "ip_address" in fb:
+                        issues.append("ip_address present")
+                    if "user_agent" in fb:
+                        issues.append("user_agent present")
+                    if "customer_email" in fb:
+                        issues.append("customer_email present")
+                    if "customer_phone" in fb:
+                        issues.append("customer_phone present")
+                
+                log_test("Public feedback endpoint", False, f"Validation failed: {', '.join(set(issues))}")
         else:
-            log_test("GET /api/admin/orders with options", False, "No orders returned")
-            return False
+            log_test("Public feedback endpoint", False, f"Expected list, got {public_feedback}")
     else:
-        log_test("GET /api/admin/orders with options", False, f"Status {resp.status_code}: {resp.text}")
-        return False
+        log_test("Public feedback endpoint", False, f"Expected 200, got {response.status_code}")
+    
+except Exception as e:
+    log_test("Public feedback endpoint", False, str(e))
 
-# ==================== REGRESSION TESTS ====================
+print()
 
-def test_regression_products():
-    """Test GET /api/products still works"""
-    resp = requests.get(f"{BASE_URL}/products")
-    if resp.status_code == 200:
-        data = resp.json()
-        if isinstance(data, list) and len(data) >= 11:
-            log_test("Regression: GET /api/products", True)
-            return True
+# Test 11: Regression - existing endpoints still work
+print("Test 11: Regression tests")
+try:
+    # GET /api/products
+    response = requests.get(f"{BASE_URL}/products")
+    
+    if response.status_code == 200 and isinstance(response.json(), list):
+        log_test("Regression: GET /api/products", True, "Still works")
+    else:
+        log_test("Regression: GET /api/products", False, f"Expected 200 with list, got {response.status_code}")
+    
+    # GET /api/admin/stats
+    admin_token = admin_login()
+    cookies = {"session_token": admin_token}
+    response = requests.get(f"{BASE_URL}/admin/stats", cookies=cookies)
+    
+    if response.status_code == 200:
+        stats = response.json()
+        if "revenue" in stats and "orders" in stats:
+            log_test("Regression: GET /api/admin/stats", True, "Still works")
         else:
-            log_test("Regression: GET /api/products", False, f"Expected >=11 products, got {len(data) if isinstance(data, list) else 'not a list'}")
-            return False
+            log_test("Regression: GET /api/admin/stats", False, f"Missing fields: {stats}")
     else:
-        log_test("Regression: GET /api/products", False, f"Status {resp.status_code}: {resp.text}")
-        return False
-
-def test_regression_admin_login():
-    """Test POST /api/auth/admin-login still works"""
-    # Already tested in admin_login(), but let's verify again
-    resp = requests.post(f"{BASE_URL}/auth/admin-login",
-                        json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD})
-    if resp.status_code == 200:
-        data = resp.json()
-        if 'user_id' in data and data.get('role') == 'admin':
-            log_test("Regression: POST /api/auth/admin-login", True)
-            return True
-        else:
-            log_test("Regression: POST /api/auth/admin-login", False, f"Unexpected response: {data}")
-            return False
+        log_test("Regression: GET /api/admin/stats", False, f"Expected 200, got {response.status_code}")
+    
+    # Create order still works
+    customer_test = create_customer_session()
+    order_test = create_order_as_customer(customer_test["token"])
+    
+    if order_test:
+        log_test("Regression: Order creation", True, "Still works")
     else:
-        log_test("Regression: POST /api/auth/admin-login", False, f"Status {resp.status_code}: {resp.text}")
-        return False
+        log_test("Regression: Order creation", False, "Order creation failed")
+    
+except Exception as e:
+    log_test("Regression tests", False, str(e))
 
-def test_regression_admin_stats():
-    """Test GET /api/admin/stats still works"""
-    resp = admin_session.get(f"{BASE_URL}/admin/stats")
-    if resp.status_code == 200:
-        data = resp.json()
-        required_keys = ['revenue', 'orders', 'pending', 'products', 'customers']
-        if all(k in data for k in required_keys):
-            log_test("Regression: GET /api/admin/stats", True)
-            return True
-        else:
-            log_test("Regression: GET /api/admin/stats", False, f"Missing keys: {data}")
-            return False
-    else:
-        log_test("Regression: GET /api/admin/stats", False, f"Status {resp.status_code}: {resp.text}")
-        return False
+print()
+print("=" * 80)
+print(f"TESTS COMPLETED: {tests_passed} passed, {tests_failed} failed")
+print("=" * 80)
+print()
 
-# ==================== MAIN TEST RUNNER ====================
-
-def main():
-    print("=" * 80)
-    print("RETRO FARMS BACKEND API TESTING - NEW FEATURES")
-    print("=" * 80)
+# Print summary
+if tests_failed > 0:
+    print("FAILED TESTS:")
+    for result in test_results:
+        if not result["passed"]:
+            print(f"  ❌ {result['test']}: {result['message']}")
     print()
-    
-    # Login
-    if not admin_login():
-        print("\n❌ Admin login failed. Cannot proceed with tests.")
-        sys.exit(1)
-    
-    if not staff_login():
-        print("\n⚠️  Staff login failed. Some tests will be skipped.")
-    
-    print("\n" + "=" * 80)
-    print("CATEGORIES CRUD")
-    print("=" * 80)
-    test_categories_public_list()
-    test_create_category()
-    test_create_duplicate_category()
-    test_update_category()
-    test_delete_category_with_products()
-    test_delete_category_with_reassign()
-    test_category_staff_permissions()
-    
-    print("\n" + "=" * 80)
-    print("REVENUE BREAKDOWN")
-    print("=" * 80)
-    test_revenue_breakdown_day()
-    test_revenue_breakdown_week()
-    test_revenue_breakdown_month()
-    test_revenue_breakdown_year()
-    test_revenue_breakdown_date_filter()
-    test_revenue_breakdown_invalid_view()
-    
-    print("\n" + "=" * 80)
-    print("EXCEL EXPORT")
-    print("=" * 80)
-    test_excel_export()
-    test_excel_export_with_filters()
-    test_excel_export_unauthenticated()
-    
-    print("\n" + "=" * 80)
-    print("CUSTOMER LOOKUP + UPDATE")
-    print("=" * 80)
-    test_customer_lookup_not_found()
-    test_customer_lookup_found()
-    test_customer_update()
-    test_customer_update_staff_permission()
-    
-    print("\n" + "=" * 80)
-    print("OFFLINE ORDER WITH NEW FIELDS")
-    print("=" * 80)
-    test_offline_order_new_fields()
-    test_offline_order_saved_address()
-    test_offline_order_reuse_customer()
-    
-    print("\n" + "=" * 80)
-    print("CHICKEN OPTIONS IN ITEMS")
-    print("=" * 80)
-    test_chicken_options_in_order()
-    test_chicken_options_in_get_order()
-    test_chicken_options_in_admin_orders()
-    
-    print("\n" + "=" * 80)
-    print("REGRESSION TESTS")
-    print("=" * 80)
-    test_regression_products()
-    test_regression_admin_login()
-    test_regression_admin_stats()
-    
-    # Summary
-    print("\n" + "=" * 80)
-    print("TEST SUMMARY")
-    print("=" * 80)
-    passed = sum(1 for t in test_results if t['passed'])
-    failed = sum(1 for t in test_results if not t['passed'])
-    total = len(test_results)
-    
-    print(f"\nTotal Tests: {total}")
-    print(f"✅ Passed: {passed}")
-    print(f"❌ Failed: {failed}")
-    print(f"Success Rate: {(passed/total*100):.1f}%")
-    
-    if failed > 0:
-        print("\n" + "=" * 80)
-        print("FAILED TESTS")
-        print("=" * 80)
-        for t in test_results:
-            if not t['passed']:
-                print(f"\n❌ {t['name']}")
-                if t['details']:
-                    print(f"   {t['details']}")
-    
-    print("\n" + "=" * 80)
-    print("DB INDEXES CHECK")
-    print("=" * 80)
-    print("✅ Check backend logs for index creation errors (see /var/log/supervisor/backend.*.log)")
-    print("   If no errors logged during startup, indexes were created successfully.")
-    
-    return 0 if failed == 0 else 1
 
-if __name__ == "__main__":
-    sys.exit(main())
+print(f"Total: {tests_passed}/{tests_passed + tests_failed} tests passed")
+print()

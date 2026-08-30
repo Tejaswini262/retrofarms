@@ -218,6 +218,19 @@ class CustomerUpdatePayload(BaseModel):
     email: Optional[str] = None
     address: Optional[Dict[str, Any]] = None
 
+class FeedbackCreatePayload(BaseModel):
+    order_id: str
+    rating: int = Field(ge=1, le=5)
+    comment: Optional[str] = ''
+
+class FeedbackEditPayload(BaseModel):
+    rating: Optional[int] = Field(default=None, ge=1, le=5)
+    comment: Optional[str] = None
+
+class FeedbackModeratePayload(BaseModel):
+    status: Optional[str] = None  # 'active' | 'flagged' | 'hidden'
+    admin_response: Optional[str] = None
+
 class VariantInput(BaseModel):
     id: str
     label: str
@@ -350,6 +363,10 @@ async def startup():
         await db.products.create_index('category')
         await db.farmers.create_index('farmer_id', unique=True)
         await db.categories.create_index('id', unique=True)
+        await db.feedback.create_index('order_id', unique=True)
+        await db.feedback.create_index('user_id')
+        await db.feedback.create_index([('created_at', -1)])
+        await db.feedback.create_index('status')
     except Exception as e:
         logging.warning(f"Index creation warning: {e}")
 
@@ -743,8 +760,10 @@ async def admin_update_order(order_id: str, payload: UpdateOrderPayload, _u=Depe
     update = {}
     if payload.status:
         update['status'] = payload.status
-        if payload.status == 'Delivered' and order.get('payment_method') == 'cod':
-            update['payment_status'] = 'Paid'
+        if payload.status == 'Delivered':
+            update['delivered_at'] = now_utc()
+            if order.get('payment_method') == 'cod':
+                update['payment_status'] = 'Paid'
     if payload.assigned_staff_id is not None:
         if payload.assigned_staff_id == '':
             update['assigned_staff_id'] = None
@@ -1289,6 +1308,162 @@ async def export_orders_xlsx(start: Optional[str] = None, end: Optional[str] = N
         media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         headers={'Content-Disposition': f'attachment; filename="{fname}"'},
     )
+
+# ==================== FEEDBACK ====================
+
+FEEDBACK_EDIT_WINDOW_HOURS = 48
+FEEDBACK_RATE_LIMIT_PER_HOUR = 5
+FEEDBACK_INSTANT_THRESHOLD_SEC = 5
+
+def _client_ip(request: Request) -> str:
+    xff = request.headers.get('x-forwarded-for')
+    if xff:
+        return xff.split(',')[0].strip()
+    return request.client.host if request.client else ''
+
+@api.post("/feedback")
+async def submit_feedback(payload: FeedbackCreatePayload, request: Request):
+    user = await require_user(request)
+    # Block admins/staff from leaving feedback
+    if user.get('role') in ('admin', 'staff'):
+        raise HTTPException(status_code=403, detail="Staff and admins cannot submit customer feedback")
+
+    order = await db.orders.find_one({'order_id': payload.order_id})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order.get('user_id') != user['user_id']:
+        raise HTTPException(status_code=403, detail="You can only review your own orders")
+    if order.get('status') != 'Delivered':
+        raise HTTPException(status_code=400, detail="Feedback is only available after your order is delivered")
+
+    if await db.feedback.find_one({'order_id': payload.order_id}):
+        raise HTTPException(status_code=400, detail="Feedback already submitted for this order — you can edit it within 48 hours")
+
+    ip = _client_ip(request)
+    now = now_utc()
+    # Rate limit: max 5 feedbacks per user OR ip in the last hour
+    one_hour_ago = now - timedelta(hours=1)
+    recent_by_user = await db.feedback.count_documents({'user_id': user['user_id'], 'created_at': {'$gte': one_hour_ago}})
+    recent_by_ip = await db.feedback.count_documents({'ip_address': ip, 'created_at': {'$gte': one_hour_ago}}) if ip else 0
+    if recent_by_user >= FEEDBACK_RATE_LIMIT_PER_HOUR or recent_by_ip >= FEEDBACK_RATE_LIMIT_PER_HOUR:
+        raise HTTPException(status_code=429, detail="Too many feedback submissions. Please try again later.")
+
+    # Anti-fraud heuristics — mark 'flagged' for admin review instead of blocking
+    flags = []
+    delivered_at = order.get('delivered_at')
+    # Guess delivered_at from status change: use created_at diff if we don't track it — fallback to now
+    if delivered_at:
+        elapsed = (now - (delivered_at if delivered_at.tzinfo else delivered_at.replace(tzinfo=timezone.utc))).total_seconds()
+        if elapsed < FEEDBACK_INSTANT_THRESHOLD_SEC:
+            flags.append('instant_after_delivery')
+    comment = (payload.comment or '').strip()
+    if comment:
+        dup = await db.feedback.find_one({'comment': comment, 'user_id': {'$ne': user['user_id']}})
+        if dup:
+            flags.append('duplicate_comment')
+    # If IP has multiple recent submissions
+    if recent_by_ip >= 3:
+        flags.append('high_ip_volume')
+    if recent_by_user >= 3:
+        flags.append('high_user_volume')
+
+    fb_id = f"fb_{uuid.uuid4().hex[:12]}"
+    doc = {
+        'feedback_id': fb_id,
+        'order_id': payload.order_id,
+        'user_id': user['user_id'],
+        'customer_email': user.get('email', ''),
+        'customer_name': user.get('name', ''),
+        'customer_phone': user.get('phone', '') or (order.get('address') or {}).get('phone', ''),
+        'rating': int(payload.rating),
+        'comment': comment,
+        'ip_address': ip,
+        'user_agent': request.headers.get('user-agent', '')[:400],
+        'status': 'flagged' if flags else 'active',
+        'flags': flags,
+        'admin_response': '',
+        'edit_count': 0,
+        'created_at': now,
+        'updated_at': now,
+    }
+    try:
+        await db.feedback.insert_one(doc)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Feedback already exists for this order")
+    doc.pop('_id', None)
+    return doc
+
+@api.patch("/feedback/{feedback_id}")
+async def edit_feedback(feedback_id: str, payload: FeedbackEditPayload, request: Request):
+    user = await require_user(request)
+    fb = await db.feedback.find_one({'feedback_id': feedback_id})
+    if not fb:
+        raise HTTPException(status_code=404, detail="Feedback not found")
+    if fb['user_id'] != user['user_id']:
+        raise HTTPException(status_code=403, detail="You can only edit your own feedback")
+    created = fb['created_at']
+    if isinstance(created, str):
+        created = datetime.fromisoformat(created)
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    if now_utc() - created > timedelta(hours=FEEDBACK_EDIT_WINDOW_HOURS):
+        raise HTTPException(status_code=400, detail=f"The {FEEDBACK_EDIT_WINDOW_HOURS}-hour edit window has closed")
+    update = {'updated_at': now_utc(), 'edit_count': fb.get('edit_count', 0) + 1}
+    if payload.rating is not None:
+        update['rating'] = int(payload.rating)
+    if payload.comment is not None:
+        update['comment'] = payload.comment.strip()
+    await db.feedback.update_one({'feedback_id': feedback_id}, {'$set': update})
+    doc = await db.feedback.find_one({'feedback_id': feedback_id}, {'_id': 0})
+    return doc
+
+@api.get("/feedback/order/{order_id}")
+async def get_order_feedback(order_id: str, request: Request):
+    user = await get_current_user(request)
+    fb = await db.feedback.find_one({'order_id': order_id}, {'_id': 0})
+    if not fb:
+        return None
+    # Only owner or admin/staff can see full details; public callers get sanitized (or nothing)
+    if not user:
+        return None
+    if user.get('role') not in ('admin', 'staff') and fb['user_id'] != user['user_id']:
+        return None
+    return fb
+
+@api.get("/admin/feedback")
+async def admin_list_feedback(status: Optional[str] = None, limit: int = 500,
+                               _u=Depends(require_admin_or_staff)):
+    q = {}
+    if status: q['status'] = status
+    docs = await db.feedback.find(q, {'_id': 0}).sort('created_at', -1).limit(limit).to_list(limit)
+    return docs
+
+@api.patch("/admin/feedback/{feedback_id}")
+async def moderate_feedback(feedback_id: str, payload: FeedbackModeratePayload,
+                             current=Depends(require_admin_or_staff)):
+    update = {}
+    if payload.status:
+        if payload.status not in ('active', 'flagged', 'hidden'):
+            raise HTTPException(status_code=400, detail="Invalid status")
+        update['status'] = payload.status
+        update['moderated_by'] = current['user_id']
+        update['moderated_at'] = now_utc()
+    if payload.admin_response is not None:
+        update['admin_response'] = payload.admin_response.strip()
+    if update:
+        r = await db.feedback.update_one({'feedback_id': feedback_id}, {'$set': update})
+        if r.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Not found")
+    doc = await db.feedback.find_one({'feedback_id': feedback_id}, {'_id': 0})
+    return doc
+
+@api.get("/feedback/public")
+async def public_feedback(limit: int = 20):
+    """Only active (moderated-safe) feedback for storefront display."""
+    docs = await db.feedback.find({'status': 'active', 'rating': {'$gte': 4}},
+                                   {'_id': 0, 'ip_address': 0, 'user_agent': 0, 'customer_email': 0, 'customer_phone': 0}
+                                   ).sort('created_at', -1).limit(limit).to_list(limit)
+    return docs
 
 # ==================== APP SETUP ====================
 

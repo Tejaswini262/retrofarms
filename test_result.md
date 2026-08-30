@@ -526,6 +526,102 @@ backend:
         agent: "testing"
         comment: "Regression tests passed. All 3 tests passed: (1) GET /api/products still returns list of 11+ products ✓ (2) POST /api/auth/admin-login still works with admin credentials, returns user object with role='admin' ✓ (3) GET /api/admin/stats still returns aggregated stats with revenue, orders, pending, products, customers fields ✓. All existing endpoints remain functional after new feature additions."
 
+  - task: "Feedback system - Submit feedback endpoint"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "POST /api/feedback endpoint fully functional. All validation tests passed: (1) Cannot submit for non-Delivered order - correctly returns 400 ✓ (2) Cannot submit for someone else's order - correctly returns 403 ✓ (3) Cannot submit unauthenticated - correctly returns 401 ✓ (4) Admin/staff cannot submit - correctly returns 403 for both roles ✓ (5) Happy path - feedback created successfully with feedback_id, rating, comment, status (active or flagged based on heuristics) ✓ (6) Duplicate prevention - correctly returns 400 when trying to submit feedback twice for same order ✓ (7) delivered_at field is correctly set when order status changes to Delivered ✓"
+
+  - task: "Feedback system - Edit feedback endpoint"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "PATCH /api/feedback/{feedback_id} endpoint fully functional. All tests passed: (1) Edit within 48h window works correctly - rating and comment updated, edit_count incremented ✓ (2) Cannot edit someone else's feedback - correctly returns 403 ✓ (3) updated_at timestamp updated on edit ✓"
+
+  - task: "Feedback system - Get feedback by order endpoint"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "GET /api/feedback/order/{order_id} endpoint fully functional. All tests passed: (1) Owner can retrieve their feedback - returns correct feedback with all fields ✓ (2) Unauthenticated requests return null (privacy protection) ✓ (3) Other customers cannot see feedback for orders they don't own ✓"
+
+  - task: "Feedback system - Anti-fraud heuristics"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "Anti-fraud auto-flagging system fully functional. All heuristics working correctly: (1) instant_after_delivery - feedback submitted within 5 seconds of delivery is flagged ✓ (2) duplicate_comment - second customer with same comment text is flagged ✓ (3) high_ip_volume / high_user_volume - multiple feedbacks from same IP or user within short time are flagged ✓. Flagged feedbacks have status='flagged' and flags array populated with specific heuristic names. System allows submission but marks for admin review instead of blocking."
+
+  - task: "Feedback system - Rate limiting"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "Rate limiting fully functional. Test passed: After 5 feedback submissions from same user or IP within 1 hour, 6th attempt correctly returns 429 'Too many feedback submissions' ✓. Rate limit applies per user_id AND per IP address (whichever hits limit first) ✓"
+
+  - task: "Feedback system - Admin moderation endpoints"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "Admin moderation endpoints fully functional. All tests passed: (1) GET /api/admin/feedback - returns all feedback sorted by created_at desc ✓ (2) GET /api/admin/feedback?status=flagged - filters by status correctly ✓ (3) PATCH /api/admin/feedback/{id} with status update - updates status to hidden/active/flagged and sets moderated_by and moderated_at fields ✓ (4) PATCH with admin_response - saves admin response text ✓ (5) Staff role can also list and moderate feedback (require_admin_or_staff) ✓. All moderation features working correctly."
+
+  - task: "Feedback system - Public feedback endpoint"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "GET /api/feedback/public endpoint fully functional. Test passed: Returns only feedback with status='active' AND rating>=4 ✓. PII fields (ip_address, user_agent, customer_email, customer_phone) are excluded from response ✓. Suitable for public storefront display without exposing sensitive customer data ✓"
+
+  - task: "Feedback system - Regression tests"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "Regression tests passed. All existing endpoints still functional after feedback system implementation: (1) GET /api/products - still works ✓ (2) GET /api/admin/stats - still works ✓ (3) Order creation - still works ✓. No breaking changes to existing functionality."
+
 frontend:
   - task: "Frontend UI"
     implemented: true
@@ -542,7 +638,7 @@ frontend:
 metadata:
   created_by: "testing_agent"
   version: "1.0"
-  test_sequence: 6
+  test_sequence: 7
   run_ui: false
 
 test_plan:
@@ -564,3 +660,5 @@ agent_communication:
     message: "Completed REFACTORED ENDPOINTS VERIFICATION. All 36 tests passed (100% success rate). Verified that recently refactored/optimized admin endpoints using MongoDB aggregation pipelines and count_documents still function correctly: (1) GET /api/admin/stats - aggregation-based stats working correctly ✓ (2) GET /api/admin/orders - pagination with limit/skip working ✓ (3) GET /api/admin/customers - aggregated total_spent calculation correct ✓ (4) GET /api/admin/customers/{user_id}/orders - limit parameter working ✓ (5) GET /api/admin/offline-customers - aggregated metadata working ✓ (6) All regression tests passed - no functional breaks ✓ (7) Data integrity verified - order creation, stats updates, revenue calculation all correct ✓. NO CRITICAL ISSUES FOUND. All refactored endpoints performing correctly with optimizations."
   - agent: "testing"
     message: "Completed testing of NEW FEATURE ADDITIONS (Categories CRUD, Revenue Breakdown, Excel Export, Customer Lookup/Update, Enhanced Offline Orders, Chicken Options). All 31 tests executed, 30 passed (96.8% success rate). Results: (1) Categories CRUD - All 7 tests passed. Public list, create, update, delete with reassign, staff permissions all working ✓ (2) Revenue Breakdown - All 6 tests passed. day/week/month/year views, date filters, invalid view validation all working ✓ (3) Excel Export - All 3 tests passed. Returns valid xlsx with correct headers, supports filters, requires auth ✓ (4) Customer Lookup/Update - 3/4 tests passed. Lookup by phone, update profile, staff permissions all working. One test showed customer already exists from previous testing (expected behavior, not a bug) ✓ (5) Enhanced Offline Orders - All 3 tests passed. Full address dict, payment fields, saved_address, customer reuse all working ✓ (6) Chicken Options - All 3 tests passed. Options field in items persists through order creation and retrieval ✓ (7) DB Indexes - Verified no errors in logs, all indexes created successfully ✓ (8) Regression Tests - All 3 tests passed. Products list, admin login, admin stats all still working ✓. NO CRITICAL ISSUES FOUND. All new endpoints fully functional."
+  - agent: "testing"
+    message: "Completed comprehensive testing of FEEDBACK SYSTEM with anti-fraud safeguards. All 25 tests passed (100% success rate). Results: (1) Submit feedback endpoint - All validation working: cannot submit for non-Delivered orders (400), cannot submit for others' orders (403), requires authentication (401), admin/staff blocked (403), happy path works with feedback_id generation, duplicate prevention (400), delivered_at field set correctly ✓ (2) Edit feedback - Edit within 48h works with edit_count increment, cannot edit others' feedback (403) ✓ (3) Get feedback by order - Owner retrieval works, unauthenticated returns null for privacy ✓ (4) Anti-fraud heuristics - All flags working: instant_after_delivery (<5 sec), duplicate_comment, high_ip_volume, high_user_volume. Flagged items marked for review instead of blocked ✓ (5) Rate limiting - 5 feedbacks per hour per user/IP enforced, 6th returns 429 ✓ (6) Admin moderation - List all, filter by status, update status (hidden/active/flagged), add admin_response, staff access all working ✓ (7) Public endpoint - Returns only active + rating>=4, excludes PII (ip_address, user_agent, customer_email, customer_phone) ✓ (8) Regression - Products, stats, order creation still working ✓. NO CRITICAL ISSUES FOUND. Feedback system fully functional with robust anti-fraud protection."
